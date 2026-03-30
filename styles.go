@@ -87,11 +87,6 @@ var (
 			Foreground(colorYellow).
 			Bold(true)
 
-	// Sort-of grade
-	sortOfStyle = lipgloss.NewStyle().
-			Foreground(colorYellow).
-			Bold(true)
-
 	// Section label (dim bold for divider labels)
 	labelStyle = lipgloss.NewStyle().
 			Foreground(colorDim).
@@ -106,3 +101,17 @@ var (
 	panelStyle = lipgloss.NewStyle().
 			Padding(0, 2)
 )
+
+// confidenceColor returns the appropriate color for a confidence level.
+func confidenceColor(level int) lipgloss.Color {
+	switch {
+	case level >= 4:
+		return colorPrimary // green
+	case level >= 2:
+		return colorYellow
+	case level == 1:
+		return colorError // red
+	default:
+		return colorDim
+	}
+}

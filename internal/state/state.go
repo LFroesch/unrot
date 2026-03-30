@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,15 +14,13 @@ type FileState struct {
 	LastQuizzed time.Time `json:"last_quizzed"`
 	Correct     int       `json:"correct"`
 	Wrong       int       `json:"wrong"`
-	Interval    float64   `json:"interval"`    // days until next review
-	EaseFactor  float64   `json:"ease_factor"` // SM-2 ease factor (>= 1.3)
-	NextReview  time.Time `json:"next_review"` // when this item is due
-	Streak      int       `json:"streak"`      // consecutive correct answers
+	Confidence  int       `json:"confidence"` // 0=new/unrated, 1-5 user-set
+	Streak      int       `json:"streak"`
 }
 
 // SessionRecord captures one completed quiz session.
 type SessionRecord struct {
-	Date        string   `json:"date"`         // "2006-01-02"
+	Date        string   `json:"date"` // "2006-01-02"
 	Correct     int      `json:"correct"`
 	Wrong       int      `json:"wrong"`
 	Total       int      `json:"total"`
@@ -29,29 +28,53 @@ type SessionRecord struct {
 	DurationSec int      `json:"duration_sec"`
 }
 
-// DueFile is a knowledge file that's due for review.
-type DueFile struct {
-	Path     string
-	Overdue  time.Duration // how far past due (negative = not yet due)
-	IsNew    bool          // never been quizzed
-	Strength float64       // 0.0-1.0 mastery estimate
-}
-
 // DomainStat holds aggregate stats for a knowledge domain.
 type DomainStat struct {
-	Domain  string
-	Total   int
-	Due     int
-	Mastery float64 // average strength across files
-	Weakest string  // worst file in domain
+	Domain        string
+	Total         int
+	AvgConfidence float64
+	Weakest       string
 }
 
-// stateJSON is the on-disk format (v2). Handles migration from v1 (bare map).
+// Achievement IDs
+const (
+	AchFirstBlood     = "first_blood"      // Answer first question
+	AchScholar        = "scholar"           // Create first knowledge file
+	AchOnFire3        = "on_fire_3"         // 3 day streak
+	AchOnFire7        = "on_fire_7"         // 7 day streak
+	AchOnFire14       = "on_fire_14"        // 14 day streak
+	AchOnFire30       = "on_fire_30"        // 30 day streak
+	AchCentury        = "century"           // 100 total questions
+	AchThousand       = "thousand"          // 1000 total questions
+	AchPerfectSession = "perfect_session"   // All confidence 4-5 in a session
+	AchDeepDive       = "deep_dive"         // 5+ questions in a single lesson chat
+	AchSpeedDemon     = "speed_demon"       // 10 questions in under 5 minutes
+)
+
+// AchievementInfo maps IDs to display names and descriptions.
+var AchievementInfo = map[string]struct{ Name, Desc string }{
+	AchFirstBlood:     {"First Blood", "answered your first question"},
+	AchScholar:        {"Scholar", "created your first knowledge file"},
+	AchOnFire3:        {"On Fire", "3 day streak"},
+	AchOnFire7:        {"Blazing", "7 day streak"},
+	AchOnFire14:       {"Unstoppable", "14 day streak"},
+	AchOnFire30:       {"Legend", "30 day streak"},
+	AchCentury:        {"Century", "100 questions answered"},
+	AchThousand:       {"Thousand", "1000 questions answered"},
+	AchPerfectSession: {"Perfect", "all confidence 4-5 in a session"},
+	AchDeepDive:       {"Deep Dive", "5+ questions in a lesson chat"},
+	AchSpeedDemon:     {"Speed Demon", "10 questions in under 5 minutes"},
+}
+
+// stateJSON is the on-disk format.
 type stateJSON struct {
 	Files           map[string]*FileState `json:"files"`
 	Sessions        []SessionRecord       `json:"sessions"`
 	DayStreak       int                   `json:"day_streak"`
 	LastSessionDate string                `json:"last_session_date"`
+	TotalXP         int                   `json:"total_xp"`
+	TotalQuestions  int                   `json:"total_questions"`
+	Achievements    []string              `json:"achievements,omitempty"`
 }
 
 type State struct {
@@ -59,6 +82,9 @@ type State struct {
 	Sessions        []SessionRecord
 	DayStreak       int
 	LastSessionDate string // "2006-01-02"
+	TotalXP         int
+	TotalQuestions  int
+	Achievements    []string
 	path            string
 }
 
@@ -105,11 +131,35 @@ func Load() (*State, error) {
 	s.Sessions = v2.Sessions
 	s.DayStreak = v2.DayStreak
 	s.LastSessionDate = v2.LastSessionDate
+	s.TotalXP = v2.TotalXP
+	s.TotalQuestions = v2.TotalQuestions
+	s.Achievements = v2.Achievements
 
-	// Migrate old entries that lack SM-2 fields
+	// Migrate: compute confidence from old correct/wrong/streak if not set
 	for _, fs := range s.Files {
-		if fs.EaseFactor == 0 {
-			fs.EaseFactor = 2.5
+		if fs.Confidence == 0 && (fs.Correct > 0 || fs.Wrong > 0) {
+			total := fs.Correct + fs.Wrong
+			ratio := float64(fs.Correct) / float64(total)
+			streakBonus := float64(fs.Streak) * 0.05
+			if streakBonus > 0.3 {
+				streakBonus = 0.3
+			}
+			strength := ratio*0.7 + streakBonus
+			if strength > 1.0 {
+				strength = 1.0
+			}
+			switch {
+			case strength >= 0.8:
+				fs.Confidence = 5
+			case strength >= 0.6:
+				fs.Confidence = 4
+			case strength >= 0.4:
+				fs.Confidence = 3
+			case strength >= 0.2:
+				fs.Confidence = 2
+			default:
+				fs.Confidence = 1
+			}
 		}
 	}
 
@@ -125,6 +175,9 @@ func (s *State) Save() error {
 		Sessions:        s.Sessions,
 		DayStreak:       s.DayStreak,
 		LastSessionDate: s.LastSessionDate,
+		TotalXP:         s.TotalXP,
+		TotalQuestions:  s.TotalQuestions,
+		Achievements:    s.Achievements,
 	}
 	data, err := json.MarshalIndent(v2, "", "  ")
 	if err != nil {
@@ -133,73 +186,63 @@ func (s *State) Save() error {
 	return os.WriteFile(s.path, data, 0644)
 }
 
+// Record tracks a correct/wrong answer for session stats.
 func (s *State) Record(path string, correct bool) {
-	fs, ok := s.Files[path]
-	if !ok {
-		fs = &FileState{Path: path, EaseFactor: 2.5}
-		s.Files[path] = fs
-	}
+	fs := s.ensureFile(path)
 	fs.LastQuizzed = time.Now()
-
 	if correct {
 		fs.Correct++
 		fs.Streak++
-		// SM-2 interval progression
-		switch {
-		case fs.Interval == 0:
-			fs.Interval = 1
-		case fs.Interval == 1:
-			fs.Interval = 3
-		default:
-			fs.Interval = fs.Interval * fs.EaseFactor
-		}
-		fs.EaseFactor += 0.05
-		if fs.EaseFactor > 3.0 {
-			fs.EaseFactor = 3.0
-		}
 	} else {
 		fs.Wrong++
 		fs.Streak = 0
-		fs.Interval = 1 // reset to 1 day
-		fs.EaseFactor -= 0.2
-		if fs.EaseFactor < 1.3 {
-			fs.EaseFactor = 1.3
-		}
 	}
-
-	fs.NextReview = fs.LastQuizzed.Add(time.Duration(fs.Interval*24) * time.Hour)
 }
 
-// RecordPartial records a "sort of" answer — counts as correct but with reduced
-// interval growth and no ease factor increase. Used when the user knew the gist
-// but not the details.
-func (s *State) RecordPartial(path string) {
+// SetConfidence sets the user's confidence rating for a file.
+func (s *State) SetConfidence(path string, level int) {
+	fs := s.ensureFile(path)
+	if level < 0 {
+		level = 0
+	}
+	if level > 5 {
+		level = 5
+	}
+	fs.Confidence = level
+}
+
+// GetConfidence returns the confidence level for a file (0=new/unrated).
+func (s *State) GetConfidence(path string) int {
+	fs := s.Files[path]
+	if fs == nil {
+		return 0
+	}
+	return fs.Confidence
+}
+
+// FilesByConfidence returns paths sorted by confidence ascending (0 first, then 1, 2...)
+// with randomized order within each confidence tier.
+func (s *State) FilesByConfidence(paths []string) []string {
+	sorted := make([]string, len(paths))
+	copy(sorted, paths)
+
+	// Shuffle first so ties are random, then stable-sort by confidence.
+	rand.Shuffle(len(sorted), func(i, j int) {
+		sorted[i], sorted[j] = sorted[j], sorted[i]
+	})
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return s.GetConfidence(sorted[i]) < s.GetConfidence(sorted[j])
+	})
+	return sorted
+}
+
+func (s *State) ensureFile(path string) *FileState {
 	fs, ok := s.Files[path]
 	if !ok {
-		fs = &FileState{Path: path, EaseFactor: 2.5}
+		fs = &FileState{Path: path}
 		s.Files[path] = fs
 	}
-	fs.LastQuizzed = time.Now()
-	fs.Correct++
-	fs.Streak++
-
-	// Reduced interval growth — roughly half the normal progression
-	switch {
-	case fs.Interval == 0:
-		fs.Interval = 1
-	case fs.Interval == 1:
-		fs.Interval = 2
-	default:
-		fs.Interval = fs.Interval * (1 + (fs.EaseFactor-1)*0.5)
-	}
-
-	// Ease factor stays flat or drifts down slightly
-	fs.EaseFactor -= 0.05
-	if fs.EaseFactor < 1.3 {
-		fs.EaseFactor = 1.3
-	}
-
-	fs.NextReview = fs.LastQuizzed.Add(time.Duration(fs.Interval*24) * time.Hour)
+	return fs
 }
 
 // RecordSession appends a session record and updates the daily streak.
@@ -260,7 +303,7 @@ func (s *State) WeekActivity() [7]int {
 	var counts [7]int
 	now := time.Now()
 	for i := 0; i < 7; i++ {
-		day := now.AddDate(0, 0, -(6 - i)).Format("2006-01-02")
+		day := now.AddDate(0, 0, -(6-i)).Format("2006-01-02")
 		for _, sr := range s.Sessions {
 			if sr.Date == day {
 				counts[i] += sr.Total
@@ -270,63 +313,8 @@ func (s *State) WeekActivity() [7]int {
 	return counts
 }
 
-// Strength returns a 0.0-1.0 mastery estimate for a file.
-func (s *State) Strength(path string) float64 {
-	fs := s.Files[path]
-	if fs == nil {
-		return 0
-	}
-	total := fs.Correct + fs.Wrong
-	if total == 0 {
-		return 0
-	}
-	ratio := float64(fs.Correct) / float64(total)
-	streakBonus := float64(fs.Streak) * 0.05
-	if streakBonus > 0.3 {
-		streakBonus = 0.3
-	}
-	strength := ratio*0.7 + streakBonus
-	if strength > 1.0 {
-		strength = 1.0
-	}
-	return strength
-}
-
-// DueItems returns files that are due for review, sorted by most overdue first.
-// Files never quizzed are always due and come first.
-func (s *State) DueItems(paths []string) []DueFile {
-	now := time.Now()
-	var due []DueFile
-
-	for _, p := range paths {
-		fs := s.Files[p]
-		if fs == nil {
-			due = append(due, DueFile{Path: p, IsNew: true, Strength: 0})
-			continue
-		}
-		overdue := now.Sub(fs.NextReview)
-		if overdue >= 0 {
-			due = append(due, DueFile{
-				Path:     p,
-				Overdue:  overdue,
-				Strength: s.Strength(p),
-			})
-		}
-	}
-
-	sort.Slice(due, func(i, j int) bool {
-		if due[i].IsNew != due[j].IsNew {
-			return due[i].IsNew
-		}
-		return due[i].Overdue > due[j].Overdue
-	})
-
-	return due
-}
-
 // DomainStats returns aggregate stats grouped by domain.
 func (s *State) DomainStats(paths []string, domainFn func(string) string) []DomainStat {
-	now := time.Now()
 	domains := make(map[string]*DomainStat)
 
 	for _, p := range paths {
@@ -338,15 +326,10 @@ func (s *State) DomainStats(paths []string, domainFn func(string) string) []Doma
 		}
 		ds.Total++
 
-		strength := s.Strength(p)
-		ds.Mastery += strength
+		conf := s.GetConfidence(p)
+		ds.AvgConfidence += float64(conf)
 
-		fs := s.Files[p]
-		if fs == nil || now.After(fs.NextReview) {
-			ds.Due++
-		}
-
-		if ds.Weakest == "" || strength < s.Strength(ds.Weakest) {
+		if ds.Weakest == "" || conf < s.GetConfidence(ds.Weakest) {
 			ds.Weakest = p
 		}
 	}
@@ -354,7 +337,7 @@ func (s *State) DomainStats(paths []string, domainFn func(string) string) []Doma
 	var result []DomainStat
 	for _, ds := range domains {
 		if ds.Total > 0 {
-			ds.Mastery /= float64(ds.Total)
+			ds.AvgConfidence /= float64(ds.Total)
 		}
 		result = append(result, *ds)
 	}
@@ -366,26 +349,97 @@ func (s *State) DomainStats(paths []string, domainFn func(string) string) []Doma
 	return result
 }
 
-// ResetFile clears all SM-2 state for a file, making it due for review immediately.
+// ResetFile clears all state for a file.
 func (s *State) ResetFile(path string) {
 	delete(s.Files, path)
 }
 
-// Stalest returns knowledge file paths sorted by staleness (least recently quizzed first).
-func (s *State) Stalest(paths []string) []string {
-	sorted := make([]string, len(paths))
-	copy(sorted, paths)
+// AwardXP adds XP and increments total questions count.
+func (s *State) AwardXP(amount int) {
+	s.TotalXP += amount
+	s.TotalQuestions++
+}
 
-	sort.Slice(sorted, func(i, j int) bool {
-		fi := s.Files[sorted[i]]
-		fj := s.Files[sorted[j]]
-		if fi == nil {
+// AwardBonusXP adds XP without incrementing question count (for learn, etc).
+func (s *State) AwardBonusXP(amount int) {
+	s.TotalXP += amount
+}
+
+// Level returns the current level (0-based, level up every 100 XP).
+func (s *State) Level() int {
+	return s.TotalXP / 100
+}
+
+// LevelProgress returns (xp within current level, xp needed for next level).
+func (s *State) LevelProgress() (int, int) {
+	return s.TotalXP % 100, 100
+}
+
+// HasAchievement checks if an achievement has been unlocked.
+func (s *State) HasAchievement(id string) bool {
+	for _, a := range s.Achievements {
+		if a == id {
 			return true
 		}
-		if fj == nil {
-			return false
-		}
-		return fi.LastQuizzed.Before(fj.LastQuizzed)
-	})
-	return sorted
+	}
+	return false
+}
+
+// UnlockAchievement adds an achievement if not already earned. Returns true if newly unlocked.
+func (s *State) UnlockAchievement(id string) bool {
+	if s.HasAchievement(id) {
+		return false
+	}
+	s.Achievements = append(s.Achievements, id)
+	return true
+}
+
+// CheckAchievements checks all achievement conditions and returns newly unlocked IDs.
+func (s *State) CheckAchievements(sessionTotal, sessionMinConf int, sessionDuration time.Duration, chatQuestions int) []string {
+	var unlocked []string
+
+	if s.TotalQuestions >= 1 && s.UnlockAchievement(AchFirstBlood) {
+		unlocked = append(unlocked, AchFirstBlood)
+	}
+	if s.TotalQuestions >= 100 && s.UnlockAchievement(AchCentury) {
+		unlocked = append(unlocked, AchCentury)
+	}
+	if s.TotalQuestions >= 1000 && s.UnlockAchievement(AchThousand) {
+		unlocked = append(unlocked, AchThousand)
+	}
+	if s.DayStreak >= 3 && s.UnlockAchievement(AchOnFire3) {
+		unlocked = append(unlocked, AchOnFire3)
+	}
+	if s.DayStreak >= 7 && s.UnlockAchievement(AchOnFire7) {
+		unlocked = append(unlocked, AchOnFire7)
+	}
+	if s.DayStreak >= 14 && s.UnlockAchievement(AchOnFire14) {
+		unlocked = append(unlocked, AchOnFire14)
+	}
+	if s.DayStreak >= 30 && s.UnlockAchievement(AchOnFire30) {
+		unlocked = append(unlocked, AchOnFire30)
+	}
+	if sessionTotal >= 3 && sessionMinConf >= 4 && s.UnlockAchievement(AchPerfectSession) {
+		unlocked = append(unlocked, AchPerfectSession)
+	}
+	if sessionTotal >= 10 && sessionDuration < 5*time.Minute && s.UnlockAchievement(AchSpeedDemon) {
+		unlocked = append(unlocked, AchSpeedDemon)
+	}
+	if chatQuestions >= 5 && s.UnlockAchievement(AchDeepDive) {
+		unlocked = append(unlocked, AchDeepDive)
+	}
+
+	return unlocked
+}
+
+// CalcXP computes XP earned for a question given confidence and difficulty.
+func CalcXP(confidence int, diffLevel int, streakDays int) int {
+	base := 10
+	confBonus := confidence * 5
+	diffBonus := diffLevel * 10 // 0=basic, 1=intermediate, 2=advanced
+	streakBonus := streakDays * 2
+	if streakBonus > 14 {
+		streakBonus = 14
+	}
+	return base + confBonus + diffBonus + streakBonus
 }

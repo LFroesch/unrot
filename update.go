@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	"sort"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,6 +34,8 @@ type prefetchMsg struct {
 
 type learnContentMsg struct {
 	content string
+	domain  string
+	slug    string
 }
 
 type learnSavedMsg struct {
@@ -55,6 +58,14 @@ type lessonMsg struct {
 type conceptChatMsg struct {
 	text string
 }
+
+type learnChatMsg struct {
+	text string
+}
+
+type reportSavedMsg struct{ path string }
+
+type notesSavedMsg struct{ content string }
 
 type errMsg struct{ err error }
 
@@ -157,13 +168,81 @@ Rules:
 	}
 }
 
-func generateKnowledge(client *ollama.Client, topic string) tea.Cmd {
+func learnClarifyCmd(client *ollama.Client, topic string, history []chatEntry, existingFiles []string) tea.Cmd {
 	return func() tea.Msg {
-		content, err := client.GenerateKnowledge(topic)
+		var updateNote string
+		if len(existingFiles) > 0 {
+			// Let ollama know what already exists for context (but no overlap detection — that's deterministic)
+			var sb strings.Builder
+			sb.WriteString("\n\nExisting knowledge files in the user's library:\n")
+			for _, f := range existingFiles {
+				sb.WriteString("- " + f + "\n")
+			}
+			updateNote = sb.String()
+		}
+
+		system := fmt.Sprintf(`You are helping a developer decide what to learn and bank as a knowledge document.
+Given their topic and any conversation so far, ask 1-2 clarifying questions to understand:
+- Their current level with this topic (beginner/intermediate/advanced)
+- Whether they want the general concept or a specific technology's implementation
+- What aspects they find confusing or want to focus on
+
+Rules:
+- Keep it conversational — 2-3 sentences max
+- If you already have enough context from the conversation, say: "I have a good picture. Press g to generate your knowledge doc."
+- Don't repeat questions they already answered%s`, updateNote)
+
+		msgs := make([]ollama.Message, 0, len(history)+1)
+		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to learn about: %s", topic)})
+		for _, h := range history {
+			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
+		}
+
+		resp, err := client.ChatWithHistory(system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
-		return learnContentMsg{content: content}
+		return learnChatMsg{text: resp}
+	}
+}
+
+func generateKnowledgeFromChat(client *ollama.Client, topic string, chatHistory []chatEntry, existingFiles []string, brainPath string, updateFile string) tea.Cmd {
+	return func() tea.Msg {
+		// Build enriched topic from conversation
+		var context strings.Builder
+		context.WriteString(fmt.Sprintf("Topic: %s\n\n", topic))
+		if len(chatHistory) > 0 {
+			context.WriteString("Conversation context:\n")
+			for _, h := range chatHistory {
+				if h.role == "user" {
+					context.WriteString(fmt.Sprintf("User: %s\n", h.content))
+				} else {
+					context.WriteString(fmt.Sprintf("Assistant: %s\n", h.content))
+				}
+			}
+		}
+
+		// Update mode: read existing file and ask ollama to merge
+		if updateFile != "" && brainPath != "" {
+			existing, err := knowledge.ReadFile(brainPath, updateFile)
+			if err != nil {
+				return errMsg{err}
+			}
+			content, err := client.UpdateKnowledge(context.String(), existing)
+			if err != nil {
+				return errMsg{err}
+			}
+			domain := knowledge.Domain(updateFile)
+			base := filepath.Base(updateFile)
+			slug := strings.TrimSuffix(base, filepath.Ext(base))
+			return learnContentMsg{content: content, domain: domain, slug: slug}
+		}
+
+		content, domain, slug, err := client.GenerateKnowledge(context.String(), existingFiles)
+		if err != nil {
+			return errMsg{err}
+		}
+		return learnContentMsg{content: content, domain: domain, slug: slug}
 	}
 }
 
@@ -222,6 +301,69 @@ func saveKnowledge(brainPath, domain, slug, content string) tea.Cmd {
 	}
 }
 
+func saveNotesCmd(brainPath, relPath, notes string) tea.Cmd {
+	return func() tea.Msg {
+		if err := knowledge.UpdateNotes(brainPath, relPath, notes); err != nil {
+			return errMsg{err}
+		}
+		content, err := knowledge.ReadFile(brainPath, relPath)
+		if err != nil {
+			return errMsg{err}
+		}
+		return notesSavedMsg{content: content}
+	}
+}
+
+func (m model) exportReportCmd() tea.Cmd {
+	correct := m.sessionCorrect
+	wrong := m.sessionWrong
+	total := m.sessionTotal
+	confSum := m.sessionConfSum
+	wrongs := m.sessionWrongs
+	domains := m.sessionDomains
+	start := m.sessionStart
+
+	return func() tea.Msg {
+		var b strings.Builder
+		b.WriteString("# Unrot Session Report\n\n")
+		b.WriteString(fmt.Sprintf("**Date:** %s\n", time.Now().Format("2006-01-02 15:04")))
+		b.WriteString(fmt.Sprintf("**Duration:** %s\n", time.Since(start).Round(time.Second)))
+		b.WriteString(fmt.Sprintf("**Questions:** %d\n", total))
+		if total > 0 {
+			pct := correct * 100 / total
+			avg := float64(confSum) / float64(total)
+			b.WriteString(fmt.Sprintf("**Score:** %d%% (%d correct, %d wrong)\n", pct, correct, wrong))
+			b.WriteString(fmt.Sprintf("**Avg Confidence:** %.1f\n", avg))
+		}
+
+		var domainList []string
+		for d := range domains {
+			domainList = append(domainList, d)
+		}
+		if len(domainList) > 0 {
+			b.WriteString(fmt.Sprintf("**Domains:** %s\n", strings.Join(domainList, ", ")))
+		}
+
+		if len(wrongs) > 0 {
+			b.WriteString("\n## Review These\n\n")
+			for _, w := range wrongs {
+				b.WriteString(fmt.Sprintf("### %s (%s)\n\n", w.file, w.qtype))
+				b.WriteString(fmt.Sprintf("**Q:** %s\n\n", w.question))
+				b.WriteString(fmt.Sprintf("**A:** %s\n\n", w.answer))
+			}
+		}
+
+		home, _ := os.UserHomeDir()
+		dir := filepath.Join(home, ".local", "share", "unrot", "reports")
+		os.MkdirAll(dir, 0755)
+		filename := fmt.Sprintf("session-%s.md", time.Now().Format("2006-01-02-150405"))
+		path := filepath.Join(dir, filename)
+		os.WriteFile(path, []byte(b.String()), 0644)
+
+		return reportSavedMsg{path: path}
+	}
+}
+
 func (m model) Init() tea.Cmd {
 	return tea.Batch(loadState(m.brainPath), m.spinner.Tick)
 }
@@ -244,6 +386,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		if m.conceptChatLoading && m.activeOverlay == overlayChat {
+			m.syncOverlayViewport()
+		}
 		return m, cmd
 
 	case stateLoadedMsg:
@@ -264,7 +409,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.answerTA.Focus()
 		m.hints = nil
 		m.userAnswer = ""
-		m.showKnowledge = false
+		m.showNotes = false
+		m.ratedConfidence = 0
 		m.quizStep = stepQuestion
 		// Prefetch next question
 		return m, m.prefetchNext()
@@ -283,7 +429,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case explainMoreMsg:
 		m.currentQ.Explanation = msg.text
-		m.quizStep = stepResult
+		m.explainLoading = false
 		m.syncViewport()
 		return m, nil
 
@@ -298,23 +444,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 
 	case conceptChatMsg:
+		m.conceptChatLoading = false
 		m.conceptChat = append(m.conceptChat, chatEntry{role: "assistant", content: msg.text})
 		// Stay in overlay — just rebuild overlay content
 		m.syncOverlayViewport()
 		return m, nil
 
+	case learnChatMsg:
+		m.learnChatHistory = append(m.learnChatHistory, chatEntry{role: "assistant", content: msg.text})
+		m.learnChatLoading = false
+		return m, nil
+
 	case learnContentMsg:
 		m.learnContent = msg.content
+		if msg.domain != "" {
+			m.learnDomain = msg.domain
+		}
+		if msg.slug != "" {
+			m.learnSlug = msg.slug
+		}
 		m.learnStep = learnReview
 		m.syncViewport()
 		return m, nil
 
 	case learnSavedMsg:
 		m.currentFile = msg.relPath
-		m.allFiles = append(m.allFiles, msg.relPath)
+		// Only add to allFiles if this is a new file (not an update)
+		if m.learnUpdateFile == "" {
+			m.allFiles = append(m.allFiles, msg.relPath)
+		}
+		// Award XP for learning
+		m.state.AwardBonusXP(50)
+		m.xpGained = 50
+		newAch := m.state.CheckAchievements(0, 6, 0, 0)
+		if m.state.UnlockAchievement(state.AchScholar) {
+			newAch = append(newAch, state.AchScholar)
+		}
+		if len(newAch) > 0 {
+			info := state.AchievementInfo[newAch[0]]
+			m.toast = fmt.Sprintf("achievement unlocked: %s — %s", info.Name, info.Desc)
+		}
+		m.state.Save()
 		m.phase = phaseQuiz
 		m.quizStep = stepLoading
 		return m, generateQuestion(m.ollama, m.brainPath, msg.relPath, m.randomActiveType(), ollama.DiffBasic)
+
+	case reportSavedMsg:
+		m.reportPath = msg.path
+		m.syncViewport()
+		return m, nil
+
+	case notesSavedMsg:
+		m.sourceContent = msg.content
+		m.syncViewport()
+		return m, nil
 
 	case errMsg:
 		m.err = msg.err
@@ -328,12 +511,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		switch m.phase {
+		case phaseTopicList:
+			if msg.Button == tea.MouseButtonWheelUp && m.pickCursor > 0 {
+				m.pickCursor--
+			} else if msg.Button == tea.MouseButtonWheelDown && m.pickCursor < len(m.pickFiles)-1 {
+				m.pickCursor++
+			}
+			return m, nil
 		case phaseQuiz:
 			switch m.quizStep {
 			case stepLesson, stepResult:
 				var cmd tea.Cmd
 				m.viewport, cmd = m.viewport.Update(msg)
 				return m, cmd
+			case stepQuestion:
+				if m.showNotes {
+					var cmd tea.Cmd
+					m.viewport, cmd = m.viewport.Update(msg)
+					return m, cmd
+				}
 			}
 		case phaseLearn:
 			if m.learnStep == learnReview {
@@ -473,7 +669,10 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 		m.syncViewport()
 		return m, nil
 	case "tab":
-		m.cycleDomainFilter()
+		m.openDomainOverlay()
+		return m, nil
+	case "t":
+		m.openQuizTypeOverlay()
 		return m, nil
 	case "q":
 		return m, tea.Quit
@@ -557,8 +756,7 @@ func (m model) handleTopicList(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.state.Save()
 		}
 	case "tab":
-		m.cycleDomainFilter()
-		m.filterPickFiles()
+		m.openDomainOverlay()
 		return m, nil
 	case "esc":
 		m.goHome()
@@ -569,11 +767,12 @@ func (m model) handleTopicList(msg tea.KeyMsg) (model, tea.Cmd) {
 func (m *model) startPickDrill() tea.Cmd {
 	file := m.pickFiles[m.pickCursor]
 	m.pickMode = true
-	m.dueFiles = nil
+	m.reviewFiles = nil
 	m.fileIdx = 0
 	m.sessionCorrect = 0
 	m.sessionWrong = 0
 	m.sessionTotal = 0
+	m.sessionConfSum = 0
 	m.sessionWrongs = nil
 	m.sessionStart = time.Now()
 	m.sessionDomains = make(map[string]bool)
@@ -582,6 +781,9 @@ func (m *model) startPickDrill() tea.Cmd {
 	m.retryCount = nil
 	m.nextQ = nil
 	m.nextFile = ""
+	m.ratedConfidence = 0
+	m.sessionMinConf = 6
+	m.learnChatCount = 0
 	m.phase = phaseQuiz
 	return m.startFile(file)
 }
@@ -604,8 +806,6 @@ func (m model) handleQuiz(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case stepQuestion:
 		return m.handleQuestion(msg)
-	case stepRevealed:
-		return m.handleRevealed(msg.String())
 	case stepResult:
 		return m.handleResult(msg)
 	}
@@ -620,18 +820,18 @@ func (m model) handleLesson(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.currentQ = m.nextQ
 			m.answerTA.Reset()
 			m.answerTA.Focus()
-				m.hints = nil
+			m.hints = nil
 			m.userAnswer = ""
-				m.nextQ = nil
+			m.showNotes = false
+			m.nextQ = nil
 			m.nextFile = ""
 			m.quizStep = stepQuestion
 			return m, m.prefetchNext()
 		}
-		diff := ollama.DifficultyFromStrength(m.state.Strength(m.currentFile))
+		diff := ollama.DifficultyFromConfidence(m.currentConfidence())
 		m.quizStep = stepLoading
 		return m, generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	case "c":
-		m.conceptChat = nil
 		m.chatFromLesson = true
 		m.answerTA.Reset()
 		m.answerTA.SetHeight(2)
@@ -639,6 +839,17 @@ func (m model) handleLesson(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.answerTA.Focus()
 		m.activeOverlay = overlayChat
 		m.syncOverlayViewport()
+		return m, nil
+	case "n":
+		if m.currentFile != "" {
+			notes := knowledge.ExtractNotes(m.sourceContent)
+			m.answerTA.SetHeight(10)
+			m.answerTA.CharLimit = 2000
+			m.answerTA.Placeholder = "add notes about this topic..."
+			m.answerTA.SetValue(notes)
+			m.answerTA.Focus()
+			m.activeOverlay = overlayNotes
+		}
 		return m, nil
 	case "esc":
 		if m.pickMode {
@@ -665,37 +876,68 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	key := msg.String()
+	m.toast = "" // clear toast on any keypress
 
-	// ctrl+e = hint
-	if key == "ctrl+e" {
+	// --- Notes view mode: single-key actions, scrollable, no textarea ---
+	if m.showNotes {
+		switch key {
+		case "tab":
+			m.showNotes = false
+			return m, nil
+		case "n":
+			if m.currentFile != "" {
+				notes := knowledge.ExtractNotes(m.sourceContent)
+				m.answerTA.SetHeight(10)
+				m.answerTA.CharLimit = 2000
+				m.answerTA.Placeholder = "add notes about this topic..."
+				m.answerTA.SetValue(notes)
+				m.answerTA.Focus()
+				m.activeOverlay = overlayNotes
+			}
+			return m, nil
+		case "c":
+			m.chatFromLesson = false
+			m.answerTA.Reset()
+			m.answerTA.SetHeight(2)
+			m.answerTA.Placeholder = "ask about this concept..."
+			m.answerTA.Focus()
+			m.activeOverlay = overlayChat
+			m.syncOverlayViewport()
+			return m, nil
+		case "h":
+			m.quizStep = stepGrading
+			m.showNotes = false
+			return m, hintCmd(m.ollama, m.currentQ.Text, m.currentQ.Answer, m.hints)
+		case "esc":
+			m.showNotes = false
+			return m, nil
+		default:
+			// Scroll viewport
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
+	}
+
+	// --- Question view ---
+
+	// Tab toggles to notes view (intercepted before textarea)
+	if key == "tab" {
+		m.showNotes = true
+		// Build notes content in viewport
+		m.viewport.SetContent(renderMarkdown(m.sourceContent, m.wrapW()))
+		m.viewport.GotoTop()
+		return m, nil
+	}
+
+	// Hint: h for MC, ctrl+e for typed
+	if key == "ctrl+e" || (key == "h" && m.currentQ.Type == ollama.TypeMultiChoice) {
 		m.quizStep = stepGrading
 		return m, hintCmd(m.ollama, m.currentQ.Text, m.currentQ.Answer, m.hints)
 	}
 
-	// Regenerate question
-	if key == "ctrl+r" {
-		diff := ollama.DifficultyFromStrength(m.currentStrength())
-		m.quizStep = stepLoading
-		m.hints = nil
-		m.showKnowledge = false
-		return m, generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
-	}
-
-	// Knowledge overlay toggle (ctrl+o — ctrl+j/k intercepted by Cursor)
-	if key == "ctrl+o" && m.sourceContent != "" {
-		if m.activeOverlay == overlayKnowledge {
-			m.activeOverlay = overlayNone
-		} else {
-			m.activeOverlay = overlayKnowledge
-			m.overlayViewport.SetContent(renderMarkdown(m.sourceContent, m.overlayViewport.Width-4))
-			m.overlayViewport.GotoTop()
-		}
-		return m, nil
-	}
-
-	// Chat overlay mid-question (ctrl+y — ctrl+t intercepted by Cursor)
-	if key == "ctrl+y" {
-		m.conceptChat = nil
+	// Chat: c for MC, ctrl+y for typed
+	if key == "ctrl+y" || (key == "c" && m.currentQ.Type == ollama.TypeMultiChoice) {
 		m.chatFromLesson = false
 		m.answerTA.Reset()
 		m.answerTA.SetHeight(2)
@@ -704,6 +946,29 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.activeOverlay = overlayChat
 		m.syncOverlayViewport()
 		return m, nil
+	}
+
+	// Notes: n for MC (single key safe)
+	if key == "n" && m.currentQ.Type == ollama.TypeMultiChoice {
+		if m.currentFile != "" {
+			notes := knowledge.ExtractNotes(m.sourceContent)
+			m.answerTA.SetHeight(10)
+			m.answerTA.CharLimit = 2000
+			m.answerTA.Placeholder = "add notes about this topic..."
+			m.answerTA.SetValue(notes)
+			m.answerTA.Focus()
+			m.activeOverlay = overlayNotes
+		}
+		return m, nil
+	}
+
+	// Regenerate question
+	if key == "ctrl+r" {
+		diff := ollama.DifficultyFromConfidence(m.currentConfidence())
+		m.quizStep = stepLoading
+		m.hints = nil
+		m.showNotes = false
+		return m, generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	}
 
 	// Multiple choice — pick a/b/c/d
@@ -718,20 +983,8 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 			} else {
 				m.grade = gradeWrong
 			}
-			m.sessionTotal++
-			if correct {
-				m.sessionCorrect++
-			} else {
-				m.sessionWrong++
-				m.sessionWrongs = append(m.sessionWrongs, wrongItem{
-					file:     m.currentFile,
-					question: m.currentQ.Text,
-					answer:   m.currentQ.Answer,
-					qtype:    m.currentQ.Type.String(),
-				})
-				m.enqueueRetry(m.currentFile)
-			}
-			m.state.Record(m.currentFile, correct)
+			m.ratedConfidence = 0
+			m.showNotes = false
 			m.quizStep = stepResult
 			m.syncViewport()
 			return m, nil
@@ -745,19 +998,15 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Non-MC: typed answer
+	// Non-MC: typed answer → straight to result with confidence picker
 	switch key {
-	case "tab":
-		m.quizStep = stepRevealed
-		return m, nil
 	case "enter":
-		answer := strings.TrimSpace(m.answerTA.Value())
-		if answer == "" {
-			return m, nil
-		}
-		m.userAnswer = answer
+		m.userAnswer = strings.TrimSpace(m.answerTA.Value())
 		m.answerTA.Reset()
-		m.quizStep = stepRevealed
+		m.ratedConfidence = 0
+		m.showNotes = false
+		m.quizStep = stepResult
+		m.syncViewport()
 		return m, nil
 	case "esc":
 		m.answerTA.Reset()
@@ -773,64 +1022,106 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 	}
 }
 
-func (m model) handleRevealed(key string) (model, tea.Cmd) {
-	switch key {
-	case "y":
-		m.grade = gradeCorrect
-		m.sessionCorrect++
-		m.sessionTotal++
-		m.state.Record(m.currentFile, true)
-		m.quizStep = stepResult
-		m.syncViewport()
-		return m, nil
-	case "s":
-		m.grade = gradePartial
-		m.sessionCorrect++
-		m.sessionTotal++
-		m.state.RecordPartial(m.currentFile)
-		m.quizStep = stepResult
-		m.syncViewport()
-		return m, nil
-	case "n":
-		m.grade = gradeWrong
-		m.sessionWrong++
-		m.sessionTotal++
-		m.state.Record(m.currentFile, false)
-		m.sessionWrongs = append(m.sessionWrongs, wrongItem{
-			file:     m.currentFile,
-			question: m.currentQ.Text,
-			answer:   m.currentQ.Answer,
-			qtype:    m.currentQ.Type.String(),
-		})
-		m.enqueueRetry(m.currentFile)
-		m.quizStep = stepResult
-		m.syncViewport()
-		return m, nil
-	case "esc":
-		if m.pickMode {
-			m.phase = phaseTopicList
-			return m, nil
-		}
-		return m, m.nextQuestion()
-	}
-	return m, nil
-}
-
 func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 	key := msg.String()
+	m.toast = "" // clear toast on any keypress
 	switch key {
+	case "1", "2", "3", "4", "5":
+		if m.ratedConfidence > 0 {
+			return m, nil // already rated
+		}
+		conf := int(key[0] - '0')
+		m.ratedConfidence = conf
+		m.state.SetConfidence(m.currentFile, conf)
+		m.sessionConfSum += conf
+		if conf < m.sessionMinConf {
+			m.sessionMinConf = conf
+		}
+
+		if m.currentQ.Type == ollama.TypeMultiChoice {
+			correct := m.grade == gradeCorrect
+			m.state.Record(m.currentFile, correct)
+			m.sessionTotal++
+			if correct {
+				m.sessionCorrect++
+			} else {
+				m.sessionWrong++
+				m.sessionWrongs = append(m.sessionWrongs, wrongItem{
+					file:     m.currentFile,
+					question: m.currentQ.Text,
+					answer:   m.currentQ.Answer,
+					qtype:    m.currentQ.Type.String(),
+				})
+				m.enqueueRetry(m.currentFile)
+			}
+		} else {
+			m.sessionTotal++
+			switch {
+			case conf >= 4:
+				m.grade = gradeCorrect
+				m.state.Record(m.currentFile, true)
+				m.sessionCorrect++
+			case conf == 3:
+				m.grade = gradePartial
+				m.state.Record(m.currentFile, true)
+				m.sessionCorrect++
+			default:
+				m.grade = gradeWrong
+				m.state.Record(m.currentFile, false)
+				m.sessionWrong++
+				m.sessionWrongs = append(m.sessionWrongs, wrongItem{
+					file:     m.currentFile,
+					question: m.currentQ.Text,
+					answer:   m.currentQ.Answer,
+					qtype:    m.currentQ.Type.String(),
+				})
+				m.enqueueRetry(m.currentFile)
+			}
+		}
+
+		// Award XP
+		diffLevel := int(m.currentQ.Difficulty)
+		xp := state.CalcXP(conf, diffLevel, m.state.DayStreak)
+		m.state.AwardXP(xp)
+		m.xpGained = xp
+
+		// Check achievements
+		newAch := m.state.CheckAchievements(
+			m.sessionTotal, m.sessionMinConf,
+			time.Since(m.sessionStart), m.learnChatCount,
+		)
+		if len(newAch) > 0 {
+			info := state.AchievementInfo[newAch[0]]
+			m.toast = fmt.Sprintf("achievement unlocked: %s — %s", info.Name, info.Desc)
+		}
+
+		m.state.Save()
+		m.syncViewport()
+		return m, nil
 	case "r":
 		// Re-quiz: generate a new question on the same topic
-		diff := ollama.DifficultyFromStrength(m.currentStrength())
+		diff := ollama.DifficultyFromConfidence(m.currentConfidence())
 		m.quizStep = stepLoading
 		m.hints = nil
+		m.ratedConfidence = 0
 		m.activeOverlay = overlayNone
 		return m, generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	case "e":
-		m.quizStep = stepGrading
+		m.explainLoading = true
+		m.syncViewport()
 		return m, explainMoreCmd(m.ollama, m.currentQ.Text, m.currentQ.Answer, m.currentQ.Explanation)
+	case "n":
+		if m.currentFile != "" {
+			notes := knowledge.ExtractNotes(m.sourceContent)
+			m.answerTA.SetHeight(10)
+			m.answerTA.CharLimit = 2000
+			m.answerTA.Placeholder = "add notes about this topic..."
+			m.answerTA.SetValue(notes)
+			m.answerTA.Focus()
+			m.activeOverlay = overlayNotes
+		}
+		return m, nil
 	case "c":
-		m.conceptChat = nil
 		m.chatFromLesson = false
 		m.answerTA.Reset()
 		m.answerTA.SetHeight(2)
@@ -839,7 +1130,7 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.activeOverlay = overlayChat
 		m.syncOverlayViewport()
 		return m, nil
-	case "ctrl+o":
+	case "k":
 		if m.sourceContent != "" {
 			if m.activeOverlay == overlayKnowledge {
 				m.activeOverlay = overlayNone
@@ -851,6 +1142,9 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter", " ":
+		if m.ratedConfidence == 0 {
+			return m, nil // must rate confidence first
+		}
 		m.activeOverlay = overlayNone
 		return m, m.nextQuestion()
 	case "esc":
@@ -877,7 +1171,7 @@ func (m model) handleOverlay(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch m.activeOverlay {
 	case overlayKnowledge:
 		switch key {
-		case "esc", "ctrl+o":
+		case "esc", "k":
 			m.activeOverlay = overlayNone
 			return m, nil
 		default:
@@ -886,10 +1180,90 @@ func (m model) handleOverlay(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, cmd
 		}
 
+	case overlayDomain:
+		switch key {
+		case "tab", "j", "down":
+			m.cycleDomainFilter()
+			m.syncDomainOverlay()
+			return m, nil
+		case "shift+tab", "k", "up":
+			m.cycleDomainFilterReverse()
+			m.syncDomainOverlay()
+			return m, nil
+		case "enter":
+			m.activeOverlay = overlayNone
+			if m.phase == phaseTopicList {
+				m.filterPickFiles()
+			}
+			return m, nil
+		case "esc":
+			m.domainCursor = m.domainCursorPrev
+			m.applyDomainCursor()
+			m.activeOverlay = overlayNone
+			return m, nil
+		}
+		return m, nil
+
+	case overlayQuizType:
+		switch key {
+		case "j", "down":
+			m.typeCursor = (m.typeCursor + 1) % len(m.activeTypes)
+			m.syncQuizTypeOverlay()
+			return m, nil
+		case "k", "up":
+			m.typeCursor--
+			if m.typeCursor < 0 {
+				m.typeCursor = len(m.activeTypes) - 1
+			}
+			m.syncQuizTypeOverlay()
+			return m, nil
+		case "enter", " ":
+			m.activeTypes[m.typeCursor] = !m.activeTypes[m.typeCursor]
+			// Don't allow disabling all types
+			anyOn := false
+			for _, on := range m.activeTypes {
+				if on {
+					anyOn = true
+					break
+				}
+			}
+			if !anyOn {
+				m.activeTypes[m.typeCursor] = true
+			}
+			m.syncQuizTypeOverlay()
+			return m, nil
+		case "esc":
+			m.activeOverlay = overlayNone
+			return m, nil
+		}
+		return m, nil
+
+	case overlayNotes:
+		switch key {
+		case "ctrl+s":
+			notes := strings.TrimSpace(m.answerTA.Value())
+			m.activeOverlay = overlayNone
+			m.answerTA.SetHeight(5)
+			m.answerTA.CharLimit = 500
+			m.answerTA.Placeholder = "type your answer..."
+			return m, saveNotesCmd(m.brainPath, m.currentFile, notes)
+		case "esc":
+			m.activeOverlay = overlayNone
+			m.answerTA.SetHeight(5)
+			m.answerTA.CharLimit = 500
+			m.answerTA.Placeholder = "type your answer..."
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.answerTA, cmd = m.answerTA.Update(msg)
+			return m, cmd
+		}
+
 	case overlayChat:
 		switch key {
 		case "esc":
 			m.activeOverlay = overlayNone
+			m.conceptChatLoading = false
 			m.answerTA.SetHeight(5)
 			m.answerTA.Placeholder = "type your answer..."
 			return m, nil
@@ -899,6 +1273,8 @@ func (m model) handleOverlay(msg tea.KeyMsg) (model, tea.Cmd) {
 				return m, nil
 			}
 			m.conceptChat = append(m.conceptChat, chatEntry{role: "user", content: question})
+			m.conceptChatLoading = true
+			m.learnChatCount++
 			m.answerTA.Reset()
 			m.answerTA.Focus()
 			m.syncOverlayViewport()
@@ -934,6 +1310,7 @@ func (m model) handleLearn(msg tea.KeyMsg) (model, tea.Cmd) {
 			if topic == "" {
 				return m, nil
 			}
+			m.learnTopic = topic
 			parts := strings.SplitN(topic, "/", 2)
 			if len(parts) == 2 {
 				m.learnDomain = strings.TrimSpace(parts[0])
@@ -942,8 +1319,66 @@ func (m model) handleLearn(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.learnDomain = "general"
 				m.learnSlug = slugify(topic)
 			}
+			// Deterministic check: does this topic match an existing file?
+			m.learnChatHistory = nil
+			m.learnChatLoading = true
+			m.learnUpdateFile = "" // reset from previous learn
+			if match := m.findMatchingFile(topic); match != "" {
+				m.learnUpdateFile = match
+				m.learnDomain = knowledge.Domain(match)
+				base := filepath.Base(match)
+				m.learnSlug = strings.TrimSuffix(base, filepath.Ext(base))
+			}
+			m.learnStep = learnChat
+			m.learnTA.Reset()
+			m.learnTA.Placeholder = "answer or press g to generate..."
+			m.learnTA.Focus()
+			return m, learnClarifyCmd(m.ollama, topic, nil, m.allFiles)
+		default:
+			var cmd tea.Cmd
+			m.learnTA, cmd = m.learnTA.Update(msg)
+			return m, cmd
+		}
+
+	case learnChat:
+		if m.learnChatLoading {
+			if key == "esc" {
+				m.learnChatLoading = false
+				m.learnStep = learnInput
+				m.learnTA.Reset()
+				m.learnTA.Placeholder = "e.g. docker/multi-stage-builds"
+				m.learnTA.Focus()
+				return m, nil
+			}
+			return m, nil
+		}
+		switch key {
+		case "g":
+			// Generate knowledge from conversation context
 			m.learnStep = learnGenerating
-			return m, generateKnowledge(m.ollama, topic)
+			var files []string
+			if !strings.Contains(m.learnTopic, "/") && m.learnUpdateFile == "" {
+				files = m.allFiles
+			}
+			return m, generateKnowledgeFromChat(m.ollama, m.learnTopic, m.learnChatHistory, files, m.brainPath, m.learnUpdateFile)
+		case "enter":
+			response := strings.TrimSpace(m.learnTA.Value())
+			if response == "" {
+				return m, nil
+			}
+			m.learnChatHistory = append(m.learnChatHistory, chatEntry{role: "user", content: response})
+			m.learnTA.Reset()
+			m.learnTA.Focus()
+			m.learnChatLoading = true
+			return m, learnClarifyCmd(m.ollama, m.learnTopic, m.learnChatHistory, m.allFiles)
+		case "esc":
+			m.learnStep = learnInput
+			m.learnTA.Reset()
+			m.learnTA.Placeholder = "e.g. docker/multi-stage-builds"
+			m.learnTA.Focus()
+			m.learnChatHistory = nil
+			m.learnUpdateFile = ""
+			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.learnTA, cmd = m.learnTA.Update(msg)
@@ -953,6 +1388,9 @@ func (m model) handleLearn(msg tea.KeyMsg) (model, tea.Cmd) {
 	case learnGenerating:
 		if key == "esc" {
 			m.learnStep = learnInput
+			m.learnTA.Reset()
+			m.learnTA.Placeholder = "e.g. docker/multi-stage-builds"
+			m.learnTA.Focus()
 			return m, nil
 		}
 
@@ -962,9 +1400,14 @@ func (m model) handleLearn(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, saveKnowledge(m.brainPath, m.learnDomain, m.learnSlug, m.learnContent)
 		case "r":
 			m.learnStep = learnGenerating
-			return m, generateKnowledge(m.ollama, m.learnTA.Value())
+			var files []string
+			if !strings.Contains(m.learnTopic, "/") && m.learnUpdateFile == "" {
+				files = m.allFiles
+			}
+			return m, generateKnowledgeFromChat(m.ollama, m.learnTopic, m.learnChatHistory, files, m.brainPath, m.learnUpdateFile)
 		case "esc":
 			m.learnTA.Reset()
+			m.learnTA.Placeholder = "e.g. docker/multi-stage-builds"
 			m.learnTA.Focus()
 			m.learnStep = learnInput
 			return m, nil
@@ -1000,6 +1443,10 @@ func (m model) handleDone(msg tea.KeyMsg) (model, tea.Cmd) {
 		if len(m.sessionWrongs) > 0 {
 			return m, m.startReview()
 		}
+	case "w":
+		if m.sessionTotal > 0 {
+			return m, m.exportReportCmd()
+		}
 	case "esc", "q":
 		m.goHome()
 		return m, nil
@@ -1024,17 +1471,10 @@ func (m *model) startReview() tea.Cmd {
 		}
 	}
 
-	m.dueFiles = m.state.DueItems(files)
-	if len(m.dueFiles) == 0 {
-		m.phase = phaseDone
-		m.syncViewport()
-		return nil
-	}
+	m.reviewFiles = m.state.FilesByConfidence(files)
 
-	m.dueFiles = warmupOrder(m.dueFiles)
-
-	if m.maxQuestions > 0 && len(m.dueFiles) > m.maxQuestions {
-		m.dueFiles = m.dueFiles[:m.maxQuestions]
+	if m.maxQuestions > 0 && len(m.reviewFiles) > m.maxQuestions {
+		m.reviewFiles = m.reviewFiles[:m.maxQuestions]
 	}
 
 	m.fileIdx = 0
@@ -1042,6 +1482,7 @@ func (m *model) startReview() tea.Cmd {
 	m.sessionCorrect = 0
 	m.sessionWrong = 0
 	m.sessionTotal = 0
+	m.sessionConfSum = 0
 	m.sessionWrongs = nil
 	m.sessionStart = time.Now()
 	m.sessionDomains = make(map[string]bool)
@@ -1050,15 +1491,19 @@ func (m *model) startReview() tea.Cmd {
 	m.retryCount = nil
 	m.nextQ = nil
 	m.nextFile = ""
+	m.ratedConfidence = 0
+	m.sessionMinConf = 6
+	m.learnChatCount = 0
 	m.phase = phaseQuiz
 
-	return m.startFile(m.dueFiles[0].Path)
+	return m.startFile(m.reviewFiles[0])
 }
 
 // startFile begins quizzing on a file. Always shows knowledge content first.
 func (m *model) startFile(file string) tea.Cmd {
 	m.currentFile = file
 	m.sourceContent = ""
+	m.conceptChat = nil
 	m.activeOverlay = overlayNone
 	return loadLesson(m.brainPath, file)
 }
@@ -1066,52 +1511,10 @@ func (m *model) startFile(file string) tea.Cmd {
 // skipToNextFile advances past the current file without answering.
 func (m *model) skipToNextFile() tea.Cmd {
 	m.fileIdx++
-	if m.fileIdx < len(m.dueFiles) {
-		return m.startFile(m.dueFiles[m.fileIdx].Path)
+	if m.fileIdx < len(m.reviewFiles) {
+		return m.startFile(m.reviewFiles[m.fileIdx])
 	}
 	return m.finishSession()
-}
-
-// warmupOrder puts up to 2 strong files first for session confidence building.
-func warmupOrder(due []state.DueFile) []state.DueFile {
-	if len(due) <= 3 {
-		return due
-	}
-
-	type candidate struct {
-		idx      int
-		strength float64
-	}
-	var warm []candidate
-	for i, d := range due {
-		if !d.IsNew && d.Strength >= 0.5 {
-			warm = append(warm, candidate{i, d.Strength})
-		}
-	}
-	if len(warm) == 0 {
-		return due
-	}
-	sort.Slice(warm, func(i, j int) bool {
-		return warm[i].strength > warm[j].strength
-	})
-
-	n := 2
-	if len(warm) < n {
-		n = len(warm)
-	}
-
-	result := make([]state.DueFile, 0, len(due))
-	used := make(map[int]bool)
-	for i := 0; i < n; i++ {
-		result = append(result, due[warm[i].idx])
-		used[warm[i].idx] = true
-	}
-	for i, d := range due {
-		if !used[i] {
-			result = append(result, d)
-		}
-	}
-	return result
 }
 
 const maxRetries = 2
@@ -1132,22 +1535,25 @@ func (m *model) nextQuestion() tea.Cmd {
 	}
 
 	if m.pickMode {
-		diff := ollama.DifficultyFromStrength(m.state.Strength(m.currentFile))
+		diff := ollama.DifficultyFromConfidence(m.state.GetConfidence(m.currentFile))
 		m.quizStep = stepLoading
+		m.ratedConfidence = 0
 		return generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	}
 
 	m.fileIdx++
-	if m.fileIdx < len(m.dueFiles) {
-		return m.startFile(m.dueFiles[m.fileIdx].Path)
+	if m.fileIdx < len(m.reviewFiles) {
+		return m.startFile(m.reviewFiles[m.fileIdx])
 	}
 	if len(m.retryQueue) > 0 {
 		m.retryPhase = true
 		file := m.retryQueue[0]
 		m.retryQueue = m.retryQueue[1:]
 		m.currentFile = file
-		diff := ollama.DifficultyFromStrength(m.state.Strength(file))
+		m.conceptChat = nil
+		diff := ollama.DifficultyFromConfidence(m.state.GetConfidence(file))
 		m.quizStep = stepLoading
+		m.ratedConfidence = 0
 		return generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	}
 	return m.finishSession()
@@ -1169,11 +1575,11 @@ func (m *model) finishSession() tea.Cmd {
 
 func (m *model) prefetchNext() tea.Cmd {
 	nextIdx := m.fileIdx + 1
-	if nextIdx >= len(m.dueFiles) {
+	if nextIdx >= len(m.reviewFiles) {
 		return nil
 	}
-	nextFile := m.dueFiles[nextIdx].Path
-	diff := ollama.DifficultyFromStrength(m.dueFiles[nextIdx].Strength)
+	nextFile := m.reviewFiles[nextIdx]
+	diff := ollama.DifficultyFromConfidence(m.state.GetConfidence(nextFile))
 	return prefetchQuestion(m.ollama, m.brainPath, nextFile, m.randomActiveType(), diff)
 }
 

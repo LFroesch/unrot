@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -40,8 +41,7 @@ const (
 	stepLoading                  // spinner while generating question
 	stepQuestion                 // showing question, waiting for answer
 	stepGrading                  // spinner while evaluating
-	stepRevealed                 // reveal mode: show answer, self-grade y/s/n
-	stepResult                   // showing verdict + explanation + grade buttons
+	stepResult                   // showing verdict + confidence picker
 )
 
 // --- Learn sub-states ---
@@ -50,6 +50,7 @@ type learnStep int
 
 const (
 	learnInput      learnStep = iota // text input for topic
+	learnChat                        // conversational clarification with ollama
 	learnGenerating                  // spinner while generating
 	learnReview                      // viewport with generated content
 )
@@ -62,6 +63,9 @@ const (
 	overlayNone      overlayType = iota
 	overlayKnowledge             // ctrl+j: full knowledge file, scrollable
 	overlayChat                  // c: multi-turn Ollama chat
+	overlayDomain                // tab: domain picker
+	overlayNotes                 // n: edit notes for current file
+	overlayQuizType              // t: quiz type picker
 )
 
 // wrongItem captures a wrong answer for the end-of-session recap.
@@ -107,12 +111,13 @@ type model struct {
 	overlayViewport viewport.Model
 
 	// Quiz state
-	dueFiles    []state.DueFile // files due for review
+	reviewFiles []string // files for review (sorted by confidence)
 	fileIdx     int
 	currentQ    *ollama.Question
 	currentFile string
-	grade       gradeKind // gradeCorrect, gradePartial, gradeWrong
-	mcPicked    int       // multiple choice: selected option index
+	grade           gradeKind // gradeCorrect, gradePartial, gradeWrong
+	ratedConfidence int       // 0=not yet rated, 1-5=user confidence pick
+	mcPicked        int       // multiple choice: selected option index
 	retryQueue  []string
 	retryPhase  bool // true when working through retry queue
 	retryCount  map[string]int
@@ -125,9 +130,10 @@ type model struct {
 	pickSearch    textinput.Model
 	pickSearching bool
 
-	// Domain filter (inline — tab to cycle on dashboard/topic list)
-	domainCursor int
-	domainList   []string // "all" at index 0, then discovered domains
+	// Domain filter (overlay picker — tab to open, tab/shift+tab to cycle)
+	domainCursor     int
+	domainList       []string // "all" at index 0, then discovered domains
+	domainCursorPrev int      // saved cursor before overlay opens (for esc revert)
 
 	// Question type picker (inline in topic list)
 	typeCursor  int
@@ -143,17 +149,39 @@ type model struct {
 	userAnswer string   // what the user typed before reveal
 
 	// Learn mode
-	learnContent string // generated knowledge content
-	learnDomain  string // domain for saving
-	learnSlug    string // filename slug
+	learnContent    string // generated knowledge content
+	learnDomain     string // domain for saving
+	learnSlug       string // filename slug
+	learnUpdateFile string // non-empty = updating existing file instead of creating new
 
 	// Teach-first / source view
 	sourceContent string // current file's knowledge content
+	showNotes     bool   // tab toggle: show notes during question
 
 	// Concept chat (overlay)
-	conceptChat    []chatEntry
-	showKnowledge  bool // legacy compat: knowledge shown inline during question
-	chatFromLesson bool // true if chat was entered from lesson step
+	conceptChat        []chatEntry
+	conceptChatLoading bool // waiting for ollama response
+	chatFromLesson     bool // true if chat was entered from lesson step
+
+	// Learn chat (conversational flow before generating)
+	learnChatHistory []chatEntry
+	learnTopic       string // original topic input
+	learnChatLoading bool   // waiting for ollama response
+
+	// Explain-more inline loading
+	explainLoading bool
+
+	// XP / achievements
+	toast    string // achievement notification (cleared on next keypress)
+	xpGained int    // XP gained this action (for display)
+	sessionMinConf int // minimum confidence rated this session (for perfect session achievement)
+	learnChatCount int // questions asked in current lesson chat (for deep dive achievement)
+
+	// Daily goal
+	dailyGoal int
+
+	// Export report
+	reportPath string
 
 	// Prefetch
 	nextQ    *ollama.Question // pre-cached next question
@@ -162,6 +190,7 @@ type model struct {
 	// Stats
 	sessionCorrect int
 	sessionWrong   int
+	sessionConfSum int // running sum of confidence ratings
 	sessionTotal   int
 	sessionWrongs  []wrongItem // wrong answers for recap
 	sessionStart   time.Time   // when review started
@@ -175,7 +204,7 @@ type model struct {
 	err      error
 }
 
-func initialModel(brainPath, domainFilter string, maxQuestions int) model {
+func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorAccent)
@@ -216,6 +245,7 @@ func initialModel(brainPath, domainFilter string, maxQuestions int) model {
 		cliDomain:       domainFilter,
 		domainFilter:    domainFilter,
 		maxQuestions:    maxQuestions,
+		dailyGoal:       dailyGoal,
 		phase:           phaseDashboard,
 		quizStep:        stepLoading,
 		learnStep:       learnInput,
@@ -228,6 +258,7 @@ func initialModel(brainPath, domainFilter string, maxQuestions int) model {
 		overlayViewport: ovp,
 		sessionDomains:  make(map[string]bool),
 		activeTypes:     allOn,
+		sessionMinConf:  6, // higher than max so first rating always sets it
 	}
 }
 
@@ -238,12 +269,12 @@ func (m model) currentDomain() string {
 	return knowledge.Domain(m.currentFile)
 }
 
-// currentStrength returns the mastery strength of the current file (0-1).
-func (m model) currentStrength() float64 {
+// currentConfidence returns the confidence level of the current file (0-5).
+func (m model) currentConfidence() int {
 	if m.state == nil || m.currentFile == "" {
 		return 0
 	}
-	return m.state.Strength(m.currentFile)
+	return m.state.GetConfidence(m.currentFile)
 }
 
 // randomActiveType picks a random question type from the enabled set.
@@ -269,6 +300,51 @@ func (m model) wrapW() int {
 	return w
 }
 
+// findMatchingFile does deterministic fuzzy matching of a topic against existing knowledge files.
+// Returns the relative path of the best match, or "" if no match.
+func (m model) findMatchingFile(topic string) string {
+	topic = strings.ToLower(strings.TrimSpace(topic))
+	// Strip domain/ prefix if present for matching
+	bare := topic
+	if parts := strings.SplitN(topic, "/", 2); len(parts) == 2 {
+		bare = parts[1]
+	}
+	// Normalize: "multi stage builds" -> "multi-stage-builds"
+	normalized := strings.ReplaceAll(bare, " ", "-")
+	words := strings.Fields(strings.ReplaceAll(bare, "-", " "))
+
+	// Pass 1: exact slug match
+	for _, f := range m.allFiles {
+		slug := slugFromPath(f)
+		if slug == normalized {
+			return f
+		}
+	}
+	// Pass 2: all words present in slug
+	var best string
+	bestCount := 0
+	for _, f := range m.allFiles {
+		slug := slugFromPath(f)
+		matched := 0
+		for _, w := range words {
+			if strings.Contains(slug, w) {
+				matched++
+			}
+		}
+		if matched == len(words) && matched > bestCount {
+			best = f
+			bestCount = matched
+		}
+	}
+	return best
+}
+
+// slugFromPath extracts the slug (filename without extension) from a knowledge path.
+func slugFromPath(relPath string) string {
+	base := filepath.Base(relPath)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 // sortByDomain returns files sorted by domain then filename.
 func sortByDomain(files []string) []string {
 	sorted := make([]string, len(files))
@@ -292,17 +368,34 @@ func (m *model) filterPickFiles() {
 	} else {
 		source = m.allFiles
 	}
-	if query == "" {
-		m.pickFiles = sortByDomain(source)
-	} else {
+	if query != "" {
 		var filtered []string
 		for _, f := range source {
 			if strings.Contains(strings.ToLower(f), query) {
 				filtered = append(filtered, f)
 			}
 		}
-		m.pickFiles = sortByDomain(filtered)
+		source = filtered
 	}
+	// Sort by domain, then confidence ascending within domain
+	sorted := make([]string, len(source))
+	copy(sorted, source)
+	sort.Slice(sorted, func(i, j int) bool {
+		di, dj := knowledge.Domain(sorted[i]), knowledge.Domain(sorted[j])
+		if di != dj {
+			return di < dj
+		}
+		ci, cj := 0, 0
+		if m.state != nil {
+			ci = m.state.GetConfidence(sorted[i])
+			cj = m.state.GetConfidence(sorted[j])
+		}
+		if ci != cj {
+			return ci < cj
+		}
+		return sorted[i] < sorted[j]
+	})
+	m.pickFiles = sorted
 	if m.pickCursor >= len(m.pickFiles) {
 		if len(m.pickFiles) > 0 {
 			m.pickCursor = len(m.pickFiles) - 1
@@ -330,12 +423,29 @@ func (m *model) buildDomainList() {
 	m.domainCursor = 0
 }
 
-// cycleDomainFilter cycles through domain options via tab.
+// cycleDomainFilter cycles forward through domain options.
 func (m *model) cycleDomainFilter() {
 	if len(m.domainList) == 0 {
 		m.buildDomainList()
 	}
 	m.domainCursor = (m.domainCursor + 1) % len(m.domainList)
+	m.applyDomainCursor()
+}
+
+// cycleDomainFilterReverse cycles backward through domain options.
+func (m *model) cycleDomainFilterReverse() {
+	if len(m.domainList) == 0 {
+		m.buildDomainList()
+	}
+	m.domainCursor--
+	if m.domainCursor < 0 {
+		m.domainCursor = len(m.domainList) - 1
+	}
+	m.applyDomainCursor()
+}
+
+// applyDomainCursor sets domainFilter based on domainCursor.
+func (m *model) applyDomainCursor() {
 	if m.domainCursor == 0 {
 		m.domainFilter = "" // "all"
 	} else {
@@ -343,25 +453,104 @@ func (m *model) cycleDomainFilter() {
 	}
 }
 
-// strengthMini renders a small inline mastery bar (5 blocks).
-func strengthMini(s float64) string {
-	blocks := 5
-	filled := int(s * float64(blocks))
-	var style lipgloss.Style
-	switch {
-	case s >= 0.7:
-		style = correctStyle
-	case s >= 0.3:
-		style = actionStyle
-	default:
-		if s > 0 {
-			style = wrongStyle
-		} else {
-			style = dimStyle
-		}
+// openDomainOverlay saves state and opens the domain picker overlay.
+func (m *model) openDomainOverlay() {
+	if len(m.domainList) == 0 {
+		m.buildDomainList()
 	}
-	return style.Render(strings.Repeat("█", filled)) +
-		barEmptyStyle.Render(strings.Repeat("░", blocks-filled))
+	m.domainCursorPrev = m.domainCursor
+	m.activeOverlay = overlayDomain
+	m.syncDomainOverlay()
+}
+
+// syncDomainOverlay rebuilds the domain overlay viewport and scrolls cursor into view.
+func (m *model) syncDomainOverlay() {
+	// Compact overlay: limit height to domain count + chrome, capped by terminal
+	maxH := m.height - 10
+	if maxH < 5 {
+		maxH = 5
+	}
+	listH := len(m.domainList)
+	if listH > maxH {
+		listH = maxH
+	}
+	m.overlayViewport.Width = 36 // inner content width
+	m.overlayViewport.Height = listH
+	m.overlayViewport.SetContent(m.buildDomainOverlayContent())
+
+	// Scroll so cursor is visible
+	if m.domainCursor < m.overlayViewport.YOffset {
+		m.overlayViewport.SetYOffset(m.domainCursor)
+	} else if m.domainCursor >= m.overlayViewport.YOffset+m.overlayViewport.Height {
+		m.overlayViewport.SetYOffset(m.domainCursor - m.overlayViewport.Height + 1)
+	}
+}
+
+// openQuizTypeOverlay opens the quiz type picker overlay.
+func (m *model) openQuizTypeOverlay() {
+	m.typeCursor = 0
+	m.activeOverlay = overlayQuizType
+	m.syncQuizTypeOverlay()
+}
+
+// syncQuizTypeOverlay rebuilds the quiz type overlay viewport.
+func (m *model) syncQuizTypeOverlay() {
+	m.overlayViewport.Width = 36
+	m.overlayViewport.Height = len(ollama.AllTypes)
+	m.overlayViewport.SetContent(m.buildQuizTypeOverlayContent())
+}
+
+// domainAvgConfidence returns the average confidence for files in a domain.
+func (m model) domainAvgConfidence(domain string) float64 {
+	if m.state == nil {
+		return 0
+	}
+	files := m.allFiles
+	if domain != "all" {
+		files = knowledge.FilterByDomain(files, domain)
+	}
+	if len(files) == 0 {
+		return 0
+	}
+	total := 0
+	for _, f := range files {
+		total += m.state.GetConfidence(f)
+	}
+	return float64(total) / float64(len(files))
+}
+
+// confidenceDots renders confidence as filled/empty dots with tier coloring.
+func confidenceDots(level int) string {
+	filled := level
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > 5 {
+		filled = 5
+	}
+	empty := 5 - filled
+	color := confidenceColor(level)
+	style := lipgloss.NewStyle().Foreground(color).Bold(true)
+	return style.Render(strings.Repeat("●", filled)) +
+		dimStyle.Render(strings.Repeat("○", empty))
+}
+
+// confidenceLabel returns a text label for a confidence level.
+func confidenceLabel(level int) string {
+	switch level {
+	case 1:
+		return "weak"
+	case 2:
+		return "shaky"
+	case 3:
+		return "okay"
+	case 4:
+		return "solid"
+	case 5:
+		return "locked"
+	default:
+		return "new"
+	}
 }
 
 // renderMarkdown applies basic styling to markdown content (headers, bullets).

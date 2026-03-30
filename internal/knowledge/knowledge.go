@@ -75,6 +75,58 @@ func Domains(paths []string) []string {
 	return result
 }
 
+// ExtractNotes pulls the ## Notes section content from file content.
+func ExtractNotes(content string) string {
+	const marker = "## Notes"
+	idx := strings.Index(content, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx+len(marker):]
+	rest = strings.TrimLeft(rest, "\n")
+	nextH2 := strings.Index(rest, "\n## ")
+	if nextH2 >= 0 {
+		rest = rest[:nextH2]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// UpdateNotes replaces or appends the ## Notes section in a knowledge file.
+func UpdateNotes(brainPath, relPath, notes string) error {
+	absPath := filepath.Join(brainPath, relPath)
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	notes = strings.TrimSpace(notes)
+
+	const marker = "\n## Notes\n"
+	idx := strings.Index(content, marker)
+	if idx >= 0 {
+		before := content[:idx]
+		after := content[idx+len(marker):]
+		nextH2 := strings.Index(after, "\n## ")
+		if nextH2 >= 0 {
+			if notes == "" {
+				content = before + after[nextH2:]
+			} else {
+				content = before + marker + notes + "\n" + after[nextH2:]
+			}
+		} else {
+			if notes == "" {
+				content = strings.TrimRight(before, "\n") + "\n"
+			} else {
+				content = before + marker + notes + "\n"
+			}
+		}
+	} else if notes != "" {
+		content = strings.TrimRight(content, "\n") + "\n\n## Notes\n\n" + notes + "\n"
+	}
+
+	return os.WriteFile(absPath, []byte(content), 0644)
+}
+
 // FilterByDomain returns only paths matching the given domain.
 func FilterByDomain(paths []string, domain string) []string {
 	var result []string

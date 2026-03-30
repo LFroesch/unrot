@@ -95,12 +95,12 @@ func (d Difficulty) String() string {
 	}
 }
 
-// DifficultyFromStrength maps a 0-1 mastery score to a difficulty level.
-func DifficultyFromStrength(s float64) Difficulty {
+// DifficultyFromConfidence maps a confidence level (0-5) to a difficulty level.
+func DifficultyFromConfidence(c int) Difficulty {
 	switch {
-	case s >= 0.7:
+	case c >= 4:
 		return DiffAdvanced
-	case s >= 0.3:
+	case c >= 3:
 		return DiffIntermediate
 	default:
 		return DiffBasic
@@ -149,41 +149,106 @@ func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, 
 }
 
 // GenerateKnowledge creates a knowledge document about a topic.
-func (c *Client) GenerateKnowledge(topic string) (string, error) {
-	system := `You are a knowledge base writer creating study material for a software developer.
-Given a topic, create a concise, well-structured knowledge document in markdown.
+// If existingFiles is non-nil, ollama suggests placement (domain/slug) based on existing structure.
+// Returns content, suggested domain, suggested slug.
+func (c *Client) GenerateKnowledge(topic string, existingFiles []string) (content, domain, slug string, err error) {
+	var placementInstr string
+	if len(existingFiles) > 0 {
+		var fileList strings.Builder
+		for _, f := range existingFiles {
+			fileList.WriteString("- " + f + "\n")
+		}
+		placementInstr = fmt.Sprintf(`
+On the FIRST line of your response, output EXACTLY:
+PLACE: domain/slug
+where domain is the best-fitting folder name and slug is a lowercase-hyphenated filename (no extension).
+Use an existing domain if appropriate, or suggest a new one.
+Then a blank line, then the knowledge document.
 
+Existing knowledge structure:
+%s`, fileList.String())
+	}
+
+	system := fmt.Sprintf(`You are a knowledge base writer creating study material for a software developer.
+The user has had a conversation clarifying what they want to learn. Use that conversation context to tailor the document to their level and focus areas.
+%s
 Rules:
 - Start with: # Topic Name
-- Then a 1-2 sentence definition
+- Then a 1-2 sentence definition that captures the core idea
 - Use these sections (include all that apply):
 
 ## Key Facts
 - Bullet points of core concepts, definitions, important numbers
-- Each bullet should be a testable fact
+- Each bullet should be a specific, testable fact — not vague summaries
+- Include concrete numbers, thresholds, defaults where relevant
 
 ## How It Works
-- Explain the mechanism/process
+- Explain the mechanism/process step by step
 - Include practical code examples in fenced code blocks
+- Show input → output or before → after where helpful
 
 ## Gotchas
 - Common mistakes, surprising behavior, edge cases
 - "What most people get wrong about this"
+- Include the WHY — not just "don't do X" but "X fails because..."
 
 ## Connections
-- How this relates to other concepts
-- When to use this vs alternatives
+- How this relates to other concepts the developer likely knows
+- When to use this vs alternatives, with concrete decision criteria
 
-- NO frontmatter
-- Keep it under 50 lines — dense and useful, not verbose
-- Focus on "things you need to remember" not textbook definitions
-- Use bullet points and code blocks liberally`
+- NO frontmatter, NO markdown code fences wrapping the whole document
+- Keep it 30-60 lines — dense and useful, not verbose, but don't cut important details
+- Focus on "things you need to remember" and "things that would trip you up"
+- Every bullet should be something worth quizzing on
+- Use bullet points and code blocks liberally
+- Tailor depth to what the conversation revealed about the user's level`, placementInstr)
 
-	resp, err := c.Chat(system, fmt.Sprintf("Topic: %s", topic))
-	if err != nil {
-		return "", err
+	resp, err2 := c.Chat(system, fmt.Sprintf("Topic: %s", topic))
+	if err2 != nil {
+		return "", "", "", err2
 	}
-	return strings.TrimSpace(resp), nil
+
+	resp = strings.TrimSpace(resp)
+
+	// Parse PLACE: line if present
+	if strings.HasPrefix(resp, "PLACE:") {
+		lines := strings.SplitN(resp, "\n", 2)
+		place := strings.TrimSpace(strings.TrimPrefix(lines[0], "PLACE:"))
+		parts := strings.SplitN(place, "/", 2)
+		if len(parts) == 2 {
+			domain = strings.TrimSpace(parts[0])
+			slug = strings.TrimSpace(parts[1])
+		}
+		if len(lines) > 1 {
+			resp = strings.TrimSpace(lines[1])
+		}
+	}
+
+	return resp, domain, slug, nil
+}
+
+// UpdateKnowledge takes an enriched topic context and existing file content,
+// and returns a merged/updated knowledge document.
+func (c *Client) UpdateKnowledge(topicContext, existingContent string) (string, error) {
+	system := `You are a knowledge base writer updating an existing study document for a software developer.
+The user had a conversation about what they want to add or change. Use that context to understand their intent.
+
+Rules:
+- Preserve the existing structure (# title, ## sections)
+- Merge new information into the appropriate existing sections
+- Add new sections only if the information doesn't fit existing ones
+- Add new bullet points, code examples, gotchas based on what the conversation revealed
+- Each bullet should be a specific, testable fact — not vague summaries
+- Do NOT duplicate information already in the document
+- Do NOT remove existing content unless the user explicitly asked to correct something
+- Keep it 30-70 lines total — dense and useful
+- Output ONLY the updated markdown document, no commentary or explanation
+- Preserve any ## Notes section at the end unchanged
+- NO markdown code fences wrapping the whole document`
+
+	user := fmt.Sprintf("Conversation context:\n%s\n\nExisting document to update:\n%s", topicContext, existingContent)
+
+	return c.Chat(system, user)
 }
 
 func difficultyClause(d Difficulty) string {
