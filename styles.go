@@ -20,17 +20,6 @@ var (
 	domainStyle = lipgloss.NewStyle().
 			Foreground(colorAccent)
 
-	typeStyle = lipgloss.NewStyle().
-			Foreground(colorWarn).
-			Italic(true)
-
-	statsStyle = lipgloss.NewStyle().
-			Foreground(colorDim)
-
-	retryStyle = lipgloss.NewStyle().
-			Foreground(colorError).
-			Bold(true)
-
 	// Content
 	questionStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -72,9 +61,6 @@ var (
 	actionStyle = lipgloss.NewStyle().
 			Foreground(colorPrimary)
 
-	bulletStyle = lipgloss.NewStyle().
-			Foreground(colorDim)
-
 	// Progress bar
 	barFilledStyle = lipgloss.NewStyle().
 			Foreground(colorPrimary)
@@ -100,6 +86,83 @@ var (
 	// Content panel — no side borders, just padding
 	panelStyle = lipgloss.NewStyle().
 			Padding(0, 2)
+
+	// Full-width header bar
+	headerBarStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("235")).
+			Padding(0, 1)
+
+	// Full-width status bar
+	statusBarStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("235")).
+			Padding(0, 1)
+
+	// Inline styles for status bar text (need matching background)
+	statusKeyStyle = lipgloss.NewStyle().
+			Foreground(colorAccent).
+			Background(lipgloss.Color("235")).
+			Bold(true).
+			Inline(true)
+
+	statusActionStyle = lipgloss.NewStyle().
+				Foreground(colorText).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	statusBulletStyle = lipgloss.NewStyle().
+				Foreground(colorDim).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	// Header inline styles
+	headerTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colorPrimary).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	headerDimStyle = lipgloss.NewStyle().
+			Foreground(colorDim).
+			Background(lipgloss.Color("235")).
+			Inline(true)
+
+	headerAccentStyle = lipgloss.NewStyle().
+				Foreground(colorAccent).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	headerWarnStyle = lipgloss.NewStyle().
+			Foreground(colorWarn).
+			Background(lipgloss.Color("235")).
+			Italic(true).
+			Inline(true)
+
+	headerStreakStyle = lipgloss.NewStyle().
+				Foreground(colorYellow).
+				Background(lipgloss.Color("235")).
+				Bold(true).
+				Inline(true)
+
+	headerBarFilledStyle = lipgloss.NewStyle().
+				Foreground(colorPrimary).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	headerBarEmptyStyle = lipgloss.NewStyle().
+				Foreground(colorDim).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	headerStatsStyle = lipgloss.NewStyle().
+				Foreground(colorDim).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
+	headerRetryStyle = lipgloss.NewStyle().
+				Foreground(colorError).
+				Background(lipgloss.Color("235")).
+				Bold(true).
+				Inline(true)
 )
 
 // confidenceColor returns the appropriate color for a confidence level.

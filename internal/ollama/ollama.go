@@ -53,6 +53,11 @@ const (
 	TypeFillBlank
 	TypeFinishCode
 	TypeMultiChoice
+	TypeCompare
+	TypeScenario
+	TypeOrdering
+	TypeCodeOutput
+	TypeDebug
 )
 
 func (t QuestionType) String() string {
@@ -65,6 +70,16 @@ func (t QuestionType) String() string {
 		return "finish-code"
 	case TypeMultiChoice:
 		return "multiple-choice"
+	case TypeCompare:
+		return "compare"
+	case TypeScenario:
+		return "scenario"
+	case TypeOrdering:
+		return "ordering"
+	case TypeCodeOutput:
+		return "code-output"
+	case TypeDebug:
+		return "debug"
 	default:
 		return "flashcard"
 	}
@@ -72,7 +87,7 @@ func (t QuestionType) String() string {
 
 // UsesTypedAnswer returns true if this question type supports typed answers.
 func (t QuestionType) UsesTypedAnswer() bool {
-	return t != TypeMultiChoice
+	return t != TypeMultiChoice && t != TypeOrdering
 }
 
 
@@ -124,7 +139,7 @@ type Message struct {
 }
 
 // AllTypes returns the full set of question types for random selection.
-var AllTypes = []QuestionType{TypeFlashcard, TypeExplain, TypeFillBlank, TypeMultiChoice}
+var AllTypes = []QuestionType{TypeFlashcard, TypeExplain, TypeFillBlank, TypeFinishCode, TypeMultiChoice, TypeCompare, TypeScenario, TypeOrdering, TypeCodeOutput, TypeDebug}
 
 // GenerateQuestion generates a question of the given type. If qtype is -1, picks randomly.
 func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, diff Difficulty) (*Question, error) {
@@ -149,9 +164,10 @@ func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, 
 }
 
 // GenerateKnowledge creates a knowledge document about a topic.
+// chatHistory contains the clarification conversation for context.
 // If existingFiles is non-nil, ollama suggests placement (domain/slug) based on existing structure.
 // Returns content, suggested domain, suggested slug.
-func (c *Client) GenerateKnowledge(topic string, existingFiles []string) (content, domain, slug string, err error) {
+func (c *Client) GenerateKnowledge(topic string, chatHistory []Message, existingFiles []string) (content, domain, slug string, err error) {
 	var placementInstr string
 	if len(existingFiles) > 0 {
 		var fileList strings.Builder
@@ -170,7 +186,7 @@ Existing knowledge structure:
 	}
 
 	system := fmt.Sprintf(`You are a knowledge base writer creating study material for a software developer.
-The user has had a conversation clarifying what they want to learn. Use that conversation context to tailor the document to their level and focus areas.
+The preceding conversation shows the user clarifying what they want to learn — their level, focus areas, and what confuses them. Use ALL of that context to tailor the document.
 %s
 Rules:
 - Start with: # Topic Name
@@ -203,7 +219,12 @@ Rules:
 - Use bullet points and code blocks liberally
 - Tailor depth to what the conversation revealed about the user's level`, placementInstr)
 
-	resp, err2 := c.Chat(system, fmt.Sprintf("Topic: %s", topic))
+	// Build messages: the clarification conversation + final generation request
+	msgs := make([]Message, 0, len(chatHistory)+1)
+	msgs = append(msgs, chatHistory...)
+	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Now generate the knowledge document for: %s", topic)})
+
+	resp, err2 := c.ChatWithHistory(system, msgs)
 	if err2 != nil {
 		return "", "", "", err2
 	}
@@ -227,11 +248,11 @@ Rules:
 	return resp, domain, slug, nil
 }
 
-// UpdateKnowledge takes an enriched topic context and existing file content,
+// UpdateKnowledge takes the clarification chat history, existing file content,
 // and returns a merged/updated knowledge document.
-func (c *Client) UpdateKnowledge(topicContext, existingContent string) (string, error) {
+func (c *Client) UpdateKnowledge(topic string, chatHistory []Message, existingContent string) (string, error) {
 	system := `You are a knowledge base writer updating an existing study document for a software developer.
-The user had a conversation about what they want to add or change. Use that context to understand their intent.
+The preceding conversation shows what the user wants to add or change. Use that context to understand their intent.
 
 Rules:
 - Preserve the existing structure (# title, ## sections)
@@ -246,9 +267,12 @@ Rules:
 - Preserve any ## Notes section at the end unchanged
 - NO markdown code fences wrapping the whole document`
 
-	user := fmt.Sprintf("Conversation context:\n%s\n\nExisting document to update:\n%s", topicContext, existingContent)
+	// Build messages: the clarification conversation + the existing doc to update
+	msgs := make([]Message, 0, len(chatHistory)+1)
+	msgs = append(msgs, chatHistory...)
+	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Now update this existing document with what we discussed.\n\nExisting document:\n%s", existingContent)})
 
-	return c.Chat(system, user)
+	return c.ChatWithHistory(system, msgs)
 }
 
 func difficultyClause(d Difficulty) string {
@@ -380,6 +404,138 @@ D) ~8KB of stack space
 ANSWER: B
 E: Goroutines start with a tiny ~2KB stack that grows as needed. OS threads start at ~1MB fixed. That 500x difference is why Go can run millions of goroutines — each one barely costs anything until it actually needs more stack space.`, dc, ec)
 
+	case TypeCompare:
+		return fmt.Sprintf(`Generate ONE compare/contrast question from the document below.
+%s
+
+Ask the user to compare two related concepts, tools, approaches, or techniques mentioned in the document. Focus on practical differences — when to use one vs the other, trade-offs, or how they behave differently.
+
+Rules:
+- Both things being compared MUST appear in the document
+- Ask about meaningful differences, not surface-level trivia
+- The answer should highlight 2-3 key differences
+
+Output EXACTLY this format (3 lines, no other text):
+Q: <question comparing two things>
+A: <2-3 key differences in 2-4 sentences>
+%s
+
+Example:
+Q: How do mutexes and channels differ for sharing state between goroutines?
+A: Mutexes protect shared memory with lock/unlock — simple for single values but error-prone (deadlocks). Channels pass ownership of data between goroutines — safer by design, but add overhead and can deadlock too if misused. Rule of thumb: use channels for coordination, mutexes for simple shared counters.
+E: Think of mutexes as a bathroom lock — one person at a time, everyone waits. Channels are like passing a note — the data moves to whoever needs it. Go's motto "share memory by communicating" favors channels, but mutexes are fine for simple cases like a hit counter.`, dc, ec)
+
+	case TypeScenario:
+		return fmt.Sprintf(`Generate ONE scenario-based question from the document below.
+%s
+
+Describe a realistic situation or problem and ask what would happen, what the user should do, or what the outcome would be. Test applied knowledge — can they use what they learned in a real context?
+
+Rules:
+- The scenario must be grounded in concepts from the document
+- Ask "what happens when...", "how would you handle...", or "what goes wrong if..."
+- The answer should demonstrate applied understanding, not just recall
+
+Output EXACTLY this format (3 lines, no other text):
+Q: <scenario description + question>
+A: <what happens or what to do, 1-3 sentences>
+%s
+
+Example:
+Q: You deploy a Go service that spawns a goroutine per request but never cancels them when clients disconnect. Traffic spikes to 10x normal. What happens?
+A: Goroutines accumulate because disconnected clients' goroutines keep running. Memory grows until the service OOMs or hits resource limits. Fix: use context.Context from the request and select on ctx.Done() to cancel work when clients disconnect.
+E: This is a goroutine leak — one of the most common Go production issues. Each goroutine is cheap (~2KB) but 10x traffic with no cleanup means they pile up. The fix is always context propagation: pass the request context down and check for cancellation.`, dc, ec)
+
+	case TypeOrdering:
+		return fmt.Sprintf(`Generate ONE ordering/sequence question from the document below.
+%s
+
+Present a process, workflow, or sequence of steps from the document and ask the user to identify the correct order. Use multiple choice where each option is a different ordering.
+
+Rules:
+- The steps must come from the document
+- Use 3-5 distinct steps that have a clear correct order
+- Each option should be a plausible but different ordering
+- Label the steps with short names (2-5 words each)
+
+Output EXACTLY this format (no other text):
+Q: What is the correct order of these steps? <context>
+A) <step> → <step> → <step> → <step>
+B) <step> → <step> → <step> → <step>
+C) <step> → <step> → <step> → <step>
+D) <step> → <step> → <step> → <step>
+ANSWER: <letter>
+%s
+
+Example:
+Q: What is the correct order for setting up a Go module from scratch?
+A) go mod init → write code → go mod tidy → go build
+B) write code → go mod init → go build → go mod tidy
+C) go mod init → go build → write code → go mod tidy
+D) go build → go mod init → write code → go mod tidy
+ANSWER: A
+E: go mod init creates the go.mod file (names your module). Then you write code with imports. go mod tidy resolves and downloads dependencies. Finally go build compiles. You can't tidy before writing code (nothing to resolve) and you can't build without a module.`, dc, ec)
+
+	case TypeCodeOutput:
+		return fmt.Sprintf(`Generate ONE "what does this code output?" question from the document below.
+%s
+
+Show a short code snippet (3-8 lines) based on concepts in the document and ask what it outputs or what value a variable holds. Test whether the user can mentally trace execution.
+
+Rules:
+- Code must relate to concepts in the document
+- Keep it short — max 8 lines of code
+- The output should be specific and deterministic (not "it depends")
+- Do NOT use backticks or markdown. Write code as plain text.
+
+Output EXACTLY this format (no other text):
+Q: What does this code output?
+<code lines>
+A: <the exact output or value>
+%s
+
+Example:
+Q: What does this code output?
+ch := make(chan int, 2)
+ch <- 1
+ch <- 2
+fmt.Println(<-ch)
+fmt.Println(<-ch)
+A: 1 then 2 (each on a new line)
+E: Buffered channels are FIFO — first in, first out. ch <- 1 goes in first, so <-ch pulls it out first. The buffer size of 2 means both sends succeed without blocking. If the buffer were 0 (unbuffered), the sends would block without a receiver on another goroutine.`, dc, ec)
+
+	case TypeDebug:
+		return fmt.Sprintf(`Generate ONE "find the bug" question from the document below.
+%s
+
+Show a short code snippet (3-8 lines) that contains ONE subtle bug related to concepts in the document. Ask the user to identify the bug and explain the fix.
+
+Rules:
+- The bug must relate to a concept covered in the document
+- Keep the code short — max 8 lines
+- The bug should be subtle but real (not a syntax error) — race conditions, off-by-one, missing cleanup, wrong API usage
+- Do NOT use backticks or markdown. Write code as plain text.
+
+Output EXACTLY this format (no other text):
+Q: What is the bug in this code?
+<code lines>
+A: <the bug and how to fix it, 1-2 sentences>
+%s
+
+Example:
+Q: What is the bug in this code?
+var mu sync.Mutex
+func increment(counter *int) {
+    mu.Lock()
+    *counter++
+    if *counter > 100 {
+        return
+    }
+    mu.Unlock()
+}
+A: The early return skips mu.Unlock(), causing a permanent deadlock. Fix: use defer mu.Unlock() right after Lock().
+E: This is the classic "forgot to unlock" bug. When counter > 100, the function returns but the mutex stays locked — every future call to increment blocks forever. defer mu.Unlock() guarantees the unlock runs no matter how the function exits (return, panic, etc.).`, dc, ec)
+
 	default: // flashcard
 		return fmt.Sprintf(`Generate ONE flashcard question from the document below.
 %s
@@ -453,7 +609,7 @@ func (c *Client) chatMulti(messages []message) (string, error) {
 func parseResponse(text string, qtype QuestionType) (*Question, error) {
 	// Strip markdown code fences that models love to add
 	text = stripCodeFences(text)
-	if qtype == TypeMultiChoice {
+	if qtype == TypeMultiChoice || qtype == TypeOrdering {
 		return parseMultiChoice(text)
 	}
 	return parseQA(text, qtype)

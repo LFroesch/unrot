@@ -93,5 +93,5 @@ func scrollHint(vp viewport.Model) string {
 	case down:
 		hint = "▼ more"
 	}
-	return dimStyle.Render(hint)
+	return headerDimStyle.Render(hint)
 }

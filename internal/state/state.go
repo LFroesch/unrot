@@ -10,12 +10,13 @@ import (
 )
 
 type FileState struct {
-	Path        string    `json:"path"`
-	LastQuizzed time.Time `json:"last_quizzed"`
-	Correct     int       `json:"correct"`
-	Wrong       int       `json:"wrong"`
-	Confidence  int       `json:"confidence"` // 0=new/unrated, 1-5 user-set
-	Streak      int       `json:"streak"`
+	Path         string    `json:"path"`
+	LastQuizzed  time.Time `json:"last_quizzed"`
+	LastReviewed time.Time `json:"last_reviewed,omitempty"` // set on question generation (opened the topic)
+	Correct      int       `json:"correct"`
+	Wrong        int       `json:"wrong"`
+	Confidence   int       `json:"confidence"` // 0=new/unrated, 1-5 user-set
+	Streak       int       `json:"streak"`
 }
 
 // SessionRecord captures one completed quiz session.
@@ -75,6 +76,8 @@ type stateJSON struct {
 	TotalXP         int                   `json:"total_xp"`
 	TotalQuestions  int                   `json:"total_questions"`
 	Achievements    []string              `json:"achievements,omitempty"`
+	Favorites       []string              `json:"favorites,omitempty"`
+	MaxQuestions    int                   `json:"max_questions,omitempty"`
 }
 
 type State struct {
@@ -85,6 +88,8 @@ type State struct {
 	TotalXP         int
 	TotalQuestions  int
 	Achievements    []string
+	Favorites       map[string]bool
+	MaxQuestions    int // 0 = use default (5)
 	path            string
 }
 
@@ -134,6 +139,11 @@ func Load() (*State, error) {
 	s.TotalXP = v2.TotalXP
 	s.TotalQuestions = v2.TotalQuestions
 	s.Achievements = v2.Achievements
+	s.Favorites = make(map[string]bool)
+	for _, f := range v2.Favorites {
+		s.Favorites[f] = true
+	}
+	s.MaxQuestions = v2.MaxQuestions
 
 	// Migrate: compute confidence from old correct/wrong/streak if not set
 	for _, fs := range s.Files {
@@ -170,6 +180,11 @@ func Load() (*State, error) {
 }
 
 func (s *State) Save() error {
+	var favs []string
+	for f := range s.Favorites {
+		favs = append(favs, f)
+	}
+	sort.Strings(favs)
 	v2 := stateJSON{
 		Files:           s.Files,
 		Sessions:        s.Sessions,
@@ -178,6 +193,8 @@ func (s *State) Save() error {
 		TotalXP:         s.TotalXP,
 		TotalQuestions:  s.TotalQuestions,
 		Achievements:    s.Achievements,
+		Favorites:       favs,
+		MaxQuestions:    s.MaxQuestions,
 	}
 	data, err := json.MarshalIndent(v2, "", "  ")
 	if err != nil {
@@ -218,6 +235,70 @@ func (s *State) GetConfidence(path string) int {
 		return 0
 	}
 	return fs.Confidence
+}
+
+// MarkReviewed sets the LastReviewed timestamp for a file (called on question generation).
+func (s *State) MarkReviewed(path string) {
+	fs := s.ensureFile(path)
+	fs.LastReviewed = time.Now()
+}
+
+// StaleDays returns days since a file was last reviewed (or -1 if never reviewed).
+func (s *State) StaleDays(path string) int {
+	fs := s.Files[path]
+	if fs == nil || fs.LastReviewed.IsZero() {
+		return -1
+	}
+	return int(time.Since(fs.LastReviewed).Hours() / 24)
+}
+
+// FilesByPriority returns paths sorted by review priority (highest priority first).
+// Priority blends: never-seen > low confidence > stale high-confidence > fresh high-confidence.
+// Within similar priority, order is randomized.
+func (s *State) FilesByPriority(paths []string) []string {
+	sorted := make([]string, len(paths))
+	copy(sorted, paths)
+
+	// Shuffle first so ties are random
+	rand.Shuffle(len(sorted), func(i, j int) {
+		sorted[i], sorted[j] = sorted[j], sorted[i]
+	})
+
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return s.priorityScore(sorted[i]) > s.priorityScore(sorted[j])
+	})
+	return sorted
+}
+
+// priorityScore computes a review priority (higher = more urgent).
+// Never-seen files get highest priority, then low confidence, then staleness boosts.
+func (s *State) priorityScore(path string) float64 {
+	fs := s.Files[path]
+
+	// Never seen at all — highest priority
+	if fs == nil || (fs.Confidence == 0 && fs.LastReviewed.IsZero()) {
+		return 100
+	}
+
+	// Base: inverse confidence (conf 1 = 50, conf 5 = 10)
+	score := float64(6-fs.Confidence) * 10
+
+	// Staleness boost: days since last review, scaled by confidence
+	// High confidence items get bigger staleness boost (they're the ones hiding at the bottom)
+	if !fs.LastReviewed.IsZero() {
+		days := time.Since(fs.LastReviewed).Hours() / 24
+		// Confidence 5 stale 30 days: +15 boost. Confidence 1 stale 30 days: +3 boost.
+		staleBoost := days * float64(fs.Confidence) * 0.1
+		if staleBoost > 30 {
+			staleBoost = 30
+		}
+		score += staleBoost
+	} else {
+		// Has been quizzed (has confidence) but no LastReviewed — treat as moderately stale
+		score += 10
+	}
+
+	return score
 }
 
 // FilesByConfidence returns paths sorted by confidence ascending (0 first, then 1, 2...)
@@ -349,6 +430,35 @@ func (s *State) DomainStats(paths []string, domainFn func(string) string) []Doma
 	return result
 }
 
+// ToggleFavorite toggles a file's favorite status. Returns new state.
+func (s *State) ToggleFavorite(path string) bool {
+	if s.Favorites == nil {
+		s.Favorites = make(map[string]bool)
+	}
+	if s.Favorites[path] {
+		delete(s.Favorites, path)
+		return false
+	}
+	s.Favorites[path] = true
+	return true
+}
+
+// IsFavorite returns whether a file is favorited.
+func (s *State) IsFavorite(path string) bool {
+	return s.Favorites[path]
+}
+
+// FavoritePaths returns all favorited file paths that exist in the given file list.
+func (s *State) FavoritePaths(allFiles []string) []string {
+	var result []string
+	for _, f := range allFiles {
+		if s.Favorites[f] {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
 // ResetFile clears all state for a file.
 func (s *State) ResetFile(path string) {
 	delete(s.Files, path)
@@ -365,14 +475,17 @@ func (s *State) AwardBonusXP(amount int) {
 	s.TotalXP += amount
 }
 
-// Level returns the current level (0-based, level up every 100 XP).
+// Level returns the current level (0-based, exponential curve).
 func (s *State) Level() int {
-	return s.TotalXP / 100
+	return LevelFromXP(s.TotalXP)
 }
 
-// LevelProgress returns (xp within current level, xp needed for next level).
+// LevelProgress returns (xp within current level, xp needed to reach next level from current).
 func (s *State) LevelProgress() (int, int) {
-	return s.TotalXP % 100, 100
+	lvl := s.Level()
+	currentThreshold := XPForLevel(lvl)
+	nextThreshold := XPForLevel(lvl + 1)
+	return s.TotalXP - currentThreshold, nextThreshold - currentThreshold
 }
 
 // HasAchievement checks if an achievement has been unlocked.
@@ -432,14 +545,60 @@ func (s *State) CheckAchievements(sessionTotal, sessionMinConf int, sessionDurat
 	return unlocked
 }
 
-// CalcXP computes XP earned for a question given confidence and difficulty.
-func CalcXP(confidence int, diffLevel int, streakDays int) int {
-	base := 10
-	confBonus := confidence * 5
-	diffBonus := diffLevel * 10 // 0=basic, 1=intermediate, 2=advanced
-	streakBonus := streakDays * 2
-	if streakBonus > 14 {
-		streakBonus = 14
+// CalcXP computes XP earned for a question given confidence, difficulty, streak, and staleness.
+func CalcXP(confidence int, diffLevel int, streakDays int, staleDays int) (total int, breakdown XPBreakdown) {
+	breakdown.Base = 15
+	breakdown.Confidence = confidence * 5
+	breakdown.Difficulty = diffLevel * 10 // 0=basic, 1=intermediate, 2=advanced
+
+	// Streak multiplier: 1.0x base, +0.1x per day, max 2.0x
+	breakdown.StreakMultiplier = 1.0 + float64(streakDays)*0.1
+	if breakdown.StreakMultiplier > 2.0 {
+		breakdown.StreakMultiplier = 2.0
 	}
-	return base + confBonus + diffBonus + streakBonus
+
+	// Staleness bonus: reviewing something you haven't touched in a while
+	if staleDays > 7 {
+		breakdown.Staleness = (staleDays - 7) / 2
+		if breakdown.Staleness > 20 {
+			breakdown.Staleness = 20
+		}
+	}
+
+	subtotal := float64(breakdown.Base+breakdown.Confidence+breakdown.Difficulty+breakdown.Staleness) * breakdown.StreakMultiplier
+	total = int(subtotal)
+	if total < 1 {
+		total = 1
+	}
+	breakdown.Total = total
+	return total, breakdown
+}
+
+// XPBreakdown shows how XP was calculated (for display on result screen).
+type XPBreakdown struct {
+	Base             int
+	Confidence       int
+	Difficulty       int
+	Staleness        int
+	Bonus            int     // casino bonus drop
+	StreakMultiplier  float64
+	Total            int
+}
+
+// XPForLevel returns total XP needed to reach a given level (exponential curve).
+// Level 1 = 40, Level 2 = 120, Level 3 = 240, etc.
+func XPForLevel(level int) int {
+	if level <= 0 {
+		return 0
+	}
+	return 40 * level * (level + 1) / 2
+}
+
+// LevelFromXP returns the current level for a given total XP (inverse of exponential curve).
+func LevelFromXP(xp int) int {
+	level := 0
+	for XPForLevel(level+1) <= xp {
+		level++
+	}
+	return level
 }

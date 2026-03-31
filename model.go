@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math/rand"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,12 @@ import (
 	"github.com/LFroesch/unrot/internal/state"
 )
 
+// Terminal size constraints
+const (
+	minTerminalWidth  = 50
+	minTerminalHeight = 15
+)
+
 // --- Phases (7 total) ---
 
 type phase int
@@ -28,6 +35,7 @@ const (
 	phaseQuiz                   // question → answer → grade → explanation → next
 	phaseLearn                  // learn input + generation + review
 	phaseStats                  // full stats view
+	phaseSettings               // settings page (quiz types, etc.)
 	phaseDone                   // session recap
 	phaseError                  // error display
 )
@@ -55,17 +63,26 @@ const (
 	learnReview                      // viewport with generated content
 )
 
+// --- Question tabs (during stepQuestion) ---
+
+type questionTab int
+
+const (
+	qTabQuiz      questionTab = iota // question + answer input
+	qTabChat                         // inline concept chat
+	qTabKnowledge                    // source material
+)
+
 // --- Overlay modes ---
 
 type overlayType int
 
 const (
 	overlayNone      overlayType = iota
-	overlayKnowledge             // ctrl+j: full knowledge file, scrollable
-	overlayChat                  // c: multi-turn Ollama chat
+	overlayKnowledge             // k: full knowledge file, scrollable (result step)
+	overlayChat                  // c: multi-turn Ollama chat (result/lesson step)
 	overlayDomain                // tab: domain picker
 	overlayNotes                 // n: edit notes for current file
-	overlayQuizType              // t: quiz type picker
 )
 
 // wrongItem captures a wrong answer for the end-of-session recap.
@@ -135,9 +152,12 @@ type model struct {
 	domainList       []string // "all" at index 0, then discovered domains
 	domainCursorPrev int      // saved cursor before overlay opens (for esc revert)
 
-	// Question type picker (inline in topic list)
+	// Question type picker
 	typeCursor  int
 	activeTypes []bool // which types are enabled (indexed by AllTypes)
+
+	// Settings page
+	settingsCursor int
 
 	// Typed answer — textarea
 	answerTA textarea.Model
@@ -155,8 +175,8 @@ type model struct {
 	learnUpdateFile string // non-empty = updating existing file instead of creating new
 
 	// Teach-first / source view
-	sourceContent string // current file's knowledge content
-	showNotes     bool   // tab toggle: show notes during question
+	sourceContent string      // current file's knowledge content
+	questionTab   questionTab // active tab during stepQuestion (quiz/chat/knowledge)
 
 	// Concept chat (overlay)
 	conceptChat        []chatEntry
@@ -172,10 +192,15 @@ type model struct {
 	explainLoading bool
 
 	// XP / achievements
-	toast    string // achievement notification (cleared on next keypress)
-	xpGained int    // XP gained this action (for display)
+	toast       string             // achievement notification (cleared on next keypress)
+	xpGained    int                // XP gained this action (for display)
+	xpBreakdown state.XPBreakdown  // breakdown of last XP award (for display)
 	sessionMinConf int // minimum confidence rated this session (for perfect session achievement)
 	learnChatCount int // questions asked in current lesson chat (for deep dive achievement)
+	levelUpFrom int    // previous level before XP award (0 = no level up pending)
+	comboCount  int    // consecutive correct answers (reset on wrong)
+	comboMax    int    // best combo this session
+
 
 	// Daily goal
 	dailyGoal int
@@ -466,7 +491,8 @@ func (m *model) openDomainOverlay() {
 // syncDomainOverlay rebuilds the domain overlay viewport and scrolls cursor into view.
 func (m *model) syncDomainOverlay() {
 	// Compact overlay: limit height to domain count + chrome, capped by terminal
-	maxH := m.height - 10
+	// Account for overlay chrome: border(2) + padding(2) + title(1) + blank lines(2) + footer(1) = 8
+	maxH := m.height - 16
 	if maxH < 5 {
 		maxH = 5
 	}
@@ -486,19 +512,6 @@ func (m *model) syncDomainOverlay() {
 	}
 }
 
-// openQuizTypeOverlay opens the quiz type picker overlay.
-func (m *model) openQuizTypeOverlay() {
-	m.typeCursor = 0
-	m.activeOverlay = overlayQuizType
-	m.syncQuizTypeOverlay()
-}
-
-// syncQuizTypeOverlay rebuilds the quiz type overlay viewport.
-func (m *model) syncQuizTypeOverlay() {
-	m.overlayViewport.Width = 36
-	m.overlayViewport.Height = len(ollama.AllTypes)
-	m.overlayViewport.SetContent(m.buildQuizTypeOverlayContent())
-}
 
 // domainAvgConfidence returns the average confidence for files in a domain.
 func (m model) domainAvgConfidence(domain string) float64 {
@@ -553,13 +566,41 @@ func confidenceLabel(level int) string {
 	}
 }
 
-// renderMarkdown applies basic styling to markdown content (headers, bullets).
+// stalenessLabel returns a human-readable staleness indicator (e.g. "3w ago").
+// Returns "" for recently reviewed (<3 days) or never-reviewed files.
+func stalenessLabel(days int) string {
+	switch {
+	case days < 0:
+		return "" // never reviewed
+	case days < 3:
+		return ""
+	case days < 7:
+		return fmt.Sprintf("%dd", days)
+	case days < 30:
+		return fmt.Sprintf("%dw", days/7)
+	case days < 365:
+		return fmt.Sprintf("%dmo", days/30)
+	default:
+		return fmt.Sprintf("%dy", days/365)
+	}
+}
+
+// renderMarkdown applies basic styling to markdown content (headers, bullets, code blocks, inline formatting).
 func renderMarkdown(content string, w int) string {
 	var b strings.Builder
 	lines := strings.Split(content, "\n")
+	inCodeBlock := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
+		case strings.HasPrefix(trimmed, "```"):
+			inCodeBlock = !inCodeBlock
+			if inCodeBlock {
+				b.WriteString("\n")
+			}
+		case inCodeBlock:
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorYellow).Render(line))
+			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "## "):
 			header := strings.TrimPrefix(trimmed, "## ")
 			b.WriteString("\n")
@@ -570,17 +611,111 @@ func renderMarkdown(content string, w int) string {
 			b.WriteString(titleStyle.PaddingLeft(2).Width(w).Render(header))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "- "):
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render("· " + strings.TrimPrefix(trimmed, "- ")))
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "- "))))
 			b.WriteString("\n")
-		case strings.HasPrefix(trimmed, "```"):
-			// skip code fence markers
+		case strings.HasPrefix(trimmed, "* "):
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "* "))))
+			b.WriteString("\n")
 		case trimmed == "":
 			b.WriteString("\n")
 		default:
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(2).Render(line))
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(2).Render(renderInline(line)))
 			b.WriteString("\n")
 		}
 	}
+	return b.String()
+}
+
+// renderExplanation renders explanation text with markdown formatting in the explanation color.
+func renderExplanation(content string, w int) string {
+	var b strings.Builder
+	lines := strings.Split(content, "\n")
+	inCodeBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "```"):
+			inCodeBlock = !inCodeBlock
+			if inCodeBlock {
+				b.WriteString("\n")
+			}
+		case inCodeBlock:
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorYellow).Render(line))
+			b.WriteString("\n")
+		case strings.HasPrefix(trimmed, "## "):
+			header := strings.TrimPrefix(trimmed, "## ")
+			b.WriteString("\n")
+			b.WriteString(sectionHeaderStyle.PaddingLeft(2).Render(header))
+			b.WriteString("\n")
+		case strings.HasPrefix(trimmed, "# "):
+			header := strings.TrimPrefix(trimmed, "# ")
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).PaddingLeft(2).Width(w).Render(header))
+			b.WriteString("\n")
+		case strings.HasPrefix(trimmed, "- "):
+			b.WriteString(explainStyle.Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "- "), explainStyle)))
+			b.WriteString("\n")
+		case strings.HasPrefix(trimmed, "* "):
+			b.WriteString(explainStyle.Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "* "), explainStyle)))
+			b.WriteString("\n")
+		case trimmed == "":
+			b.WriteString("\n")
+		default:
+			b.WriteString(explainStyle.Width(w).PaddingLeft(2).Render(renderInline(line, explainStyle)))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// renderInline applies basic inline markdown formatting (**bold**, `code`).
+// Accepts an optional base style applied to plain text segments to prevent
+// ANSI reset sequences from breaking parent coloring (fixes yellow/grey alternation).
+func renderInline(text string, base ...lipgloss.Style) string {
+	var b strings.Builder
+	var plain strings.Builder
+	hasBase := len(base) > 0
+
+	flushPlain := func() {
+		if plain.Len() > 0 {
+			if hasBase {
+				b.WriteString(base[0].Render(plain.String()))
+			} else {
+				b.WriteString(plain.String())
+			}
+			plain.Reset()
+		}
+	}
+
+	i := 0
+	for i < len(text) {
+		// Bold: **text**
+		if i+1 < len(text) && text[i] == '*' && text[i+1] == '*' {
+			end := strings.Index(text[i+2:], "**")
+			if end >= 0 {
+				flushPlain()
+				style := lipgloss.NewStyle().Bold(true)
+				if hasBase {
+					style = style.Inherit(base[0])
+				}
+				b.WriteString(style.Render(text[i+2 : i+2+end]))
+				i = i + 2 + end + 2
+				continue
+			}
+		}
+		// Inline code: `text`
+		if text[i] == '`' {
+			end := strings.Index(text[i+1:], "`")
+			if end >= 0 {
+				flushPlain()
+				b.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render(text[i+1 : i+1+end]))
+				i = i + 1 + end + 1
+				continue
+			}
+		}
+		plain.WriteByte(text[i])
+		i++
+	}
+	flushPlain()
 	return b.String()
 }
 

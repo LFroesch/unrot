@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	maxQ := flag.Int("n", 10, "max questions per session (0 = unlimited)")
+	maxQ := flag.Int("n", 0, "max questions per session (0 = use saved setting, default 5)")
 	flag.Parse()
 
 	brainPath := os.Getenv("SECOND_BRAIN")
