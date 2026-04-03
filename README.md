@@ -1,6 +1,6 @@
 # unrot
 
-Quiz TUI that fights knowledge decay. Type answers, get Ollama-powered feedback, track mastery via SM-2 spaced repetition. Learn new topics, bank them to your Second Brain, quiz immediately. Daily streak tracking keeps you coming back.
+Quiz TUI that fights knowledge decay. Confidence-based review with Ollama-generated questions from Second Brain knowledge files. XP/leveling, achievements, open-notes testing, conversational learn flow, standalone coding challenges. Daily streaks keep you coming back.
 
 ## Run
 
@@ -14,51 +14,97 @@ unrot -n 0 docker  # unlimited, docker only
 
 ## Screens
 
-- **Dashboard** — home screen with streak, due count, inline domain filter (tab to cycle), quick actions, recent session summary. `enter` starts review immediately.
-- **Topic List** — browse/search all knowledge files with domain tabs, mastery bars. `/` to search, `+` to add, `x` to reset, `tab` to filter by domain.
-- **Quiz** — single consolidated screen: lesson → question → answer → grade → explanation → next. Knowledge and chat available as overlays.
-- **Learn** — type a topic (e.g. `docker/volumes`), Ollama generates a structured knowledge doc, review/save it, quiz immediately.
-- **Stats** — daily streak, today's accuracy, 7-day activity chart, domains ranked by mastery %.
+- **Dashboard** — streak, confidence distribution, domain filter (tab), quick actions, recent sessions, daily goal progress
+- **Topic List** — browse/search knowledge files with domain tabs, confidence dots, staleness labels, favorites (f to toggle)
+- **Quiz** — teach-first flow: lesson → question → grade → result. 10 question types. Rate confidence 1-5 after each.
+- **Learn** — conversational: type a topic, chat with Ollama to clarify, generate structured knowledge doc, review/save/quiz
+- **Challenge** — standalone coding exercises (i from dashboard). Adaptive difficulty, Ollama-graded, full XP integration
+- **Stats** — domain confidence, streaks, 7-day activity, achievements (31 total)
+- **Settings** — toggle question types on/off
 
 ## Controls
 
 | Key | Context | Action |
 |-----|---------|--------|
 | `enter` | dashboard | start review |
-| `tab` | dashboard/topics | cycle domain filter |
+| `r` | dashboard | smart review (priority-ordered) |
+| `F` | dashboard | focused review (favorites only) |
 | `b` | dashboard | browse topics |
 | `l` | dashboard | learn something new |
-| `s` | dashboard | view stats |
+| `i` | dashboard | challenge mode |
+| `s` | dashboard | settings (quiz types) |
+| `a` | dashboard | stats / achievements |
+| `tab` | dashboard/topics | cycle domain filter |
 | `/` | topic list | search/filter |
-| `+` | topic list | add new concept |
-| `x` | topic list | reset SM-2 for selected |
+| `f` | topic list | toggle favorite |
+| `x` | topic list | reset confidence for selected |
 | `j`/`k` | topic list | navigate |
-| `enter` | topic list | drill selected topic |
-| `enter` | question | submit answer → reveal |
-| `tab` | question | reveal answer (skip typing) |
-| `ctrl+e` | question | get a hint (repeatable) |
+| `enter` | question | submit answer |
+| `tab`/`shift+tab` | question | cycle tabs (chat / quiz / knowledge) |
+| `h` | MC question | hint |
+| `ctrl+e` | typed question | hint (repeatable) |
 | `ctrl+r` | question | regenerate question |
-| `ctrl+o` | question/result | toggle knowledge overlay |
-| `ctrl+y` | question | open chat overlay |
-| `a-d` | multiple choice | pick answer |
-| `y`/`s`/`n` | revealed | knew it / sort of / didn't know |
-| `r` | result | re-quiz same topic |
+| `a-d` | MC/ordering | pick answer |
+| `1-5` | result | rate confidence |
+| `k` | result | knowledge overlay |
+| `c` | result/lesson | chat overlay |
+| `n` | result/lesson | notes overlay |
 | `e` | result | explain more |
-| `c` | result/lesson | open chat overlay |
-| `enter` | result | next question |
+| `ctrl+b` | chat overlay | bank insights to notes |
+| `a` | knowledge overlay | audit file accuracy |
+| `ctrl+s` | challenge/notes | submit / save |
+| `w` | done screen | export session report |
 | `esc` | overlay | close overlay |
-| `esc` | everywhere else | back one level |
+| `esc` | everywhere | back one level |
 | `q` | dashboard | quit |
-| `ctrl+c` | anywhere | force quit |
+
+## Question Types (10)
+
+flashcard, explain, fill-blank, finish-code, multiple-choice, compare, scenario, ordering, code-output, debug — all toggleable in settings.
+
+## Knowledge Files
+
+Markdown files in `SECOND_BRAIN/knowledge/<domain>/<slug>.md`. Standard sections:
+
+- Content sections (headers, code blocks, gotchas)
+- `## Connections` — related concepts + prerequisite declarations
+- `## Notes` — personal notes (editable via `n` overlay)
+
+### Prerequisites
+
+Declare dependencies between knowledge files using `- requires: domain/slug` in the `## Connections` section:
+
+```markdown
+## Connections
+- requires: go/goroutines
+- requires: go/interfaces
+- Channels are the primary way to communicate between goroutines
+```
+
+When starting a review, unrot checks prerequisites: if `goroutines` has low confidence (0-2), it gets inserted before `channels` in the session queue. Dependencies are resolved transitively (deepest-first) with cycle detection.
+
+Domain interleaving ensures no more than 2 consecutive same-domain files per session (prereq pairs stay adjacent).
+
+## Setup
+
+Set `SECOND_BRAIN` to the root of your knowledge base (parent of `knowledge/`):
+
+```bash
+# in ~/.zshrc or ~/.bashrc
+export SECOND_BRAIN="$HOME/path/to/your/second-brain"
+```
+
+Or skip the env var — on first launch unrot opens settings where you can set the path. It's saved to `state.json` so you only do it once.
 
 ## Config
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `SECOND_BRAIN` | `~/projects/active/daily_use/SECOND_BRAIN` | Path to Second Brain |
+| `SECOND_BRAIN` | (none — set via env or settings) | Path to Second Brain root |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
 | `UNROT_MODEL` | `qwen2.5:3b` | Model for question generation |
+| `UNROT_DAILY_GOAL` | (unset) | Daily question goal (shows progress bar) |
 
 ## State
 
-Quiz history, SM-2 data, session history, and streak stored at `~/.local/share/unrot/state.json`. Auto-migrates from older format.
+Confidence data, session history, streaks, achievements, and favorites stored at `~/.local/share/unrot/state.json`. Session reports exportable to `~/.local/share/unrot/reports/`.

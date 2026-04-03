@@ -39,32 +39,127 @@ type DomainStat struct {
 
 // Achievement IDs
 const (
-	AchFirstBlood     = "first_blood"      // Answer first question
-	AchScholar        = "scholar"           // Create first knowledge file
-	AchOnFire3        = "on_fire_3"         // 3 day streak
-	AchOnFire7        = "on_fire_7"         // 7 day streak
-	AchOnFire14       = "on_fire_14"        // 14 day streak
-	AchOnFire30       = "on_fire_30"        // 30 day streak
-	AchCentury        = "century"           // 100 total questions
-	AchThousand       = "thousand"          // 1000 total questions
-	AchPerfectSession = "perfect_session"   // All confidence 4-5 in a session
-	AchDeepDive       = "deep_dive"         // 5+ questions in a single lesson chat
-	AchSpeedDemon     = "speed_demon"       // 10 questions in under 5 minutes
+	// Milestones
+	AchFirstBlood = "first_blood" // Answer first question
+	AchHalfCent   = "half_cent"   // 50 total questions
+	AchCentury    = "century"     // 100 total questions
+	AchFiveHundo  = "five_hundo"  // 500 total questions
+	AchThousand   = "thousand"    // 1000 total questions
+
+	// Streaks
+	AchOnFire3  = "on_fire_3"  // 3 day streak
+	AchOnFire7  = "on_fire_7"  // 7 day streak
+	AchOnFire14 = "on_fire_14" // 14 day streak
+	AchOnFire30 = "on_fire_30" // 30 day streak
+
+	// Combos
+	AchCombo3  = "combo_3"  // 3 correct in a row
+	AchCombo5  = "combo_5"  // 5 correct in a row
+	AchCombo10 = "combo_10" // 10 correct in a row
+	AchCombo20 = "combo_20" // 20 correct in a row
+
+	// Session
+	AchPerfectSession = "perfect_session" // All confidence 4-5 in a session
+	AchSpeedDemon     = "speed_demon"     // 10 questions in under 5 minutes
+	AchMarathon       = "marathon"        // 20+ questions in a session
+	AchDeepDive       = "deep_dive"       // 5+ questions in a single lesson chat
+
+	// Learning
+	AchScholar      = "scholar"      // Create first knowledge file
+	AchLibrarian    = "librarian"    // 25+ knowledge files
+	AchEncyclopedia = "encyclopedia" // 100+ knowledge files
+
+	// Domains
+	AchExplorer  = "explorer"  // 3+ domains in one session
+	AchPolyglot  = "polyglot"  // 5+ domains in one session
+	AchSpecialist = "specialist" // all files in a domain at confidence 4+
+
+	// Confidence
+	AchFirstLock = "first_lock" // First file at confidence 5
+	AchTenLocked = "ten_locked" // 10 files at confidence 5
+
+	// Fun / rare
+	AchJackpot    = "jackpot"    // Hit a jackpot bonus
+	AchNightOwl   = "night_owl"  // Session after midnight
+	AchEarlyBird  = "early_bird" // Session before 7am
+	AchComeback   = "comeback"   // Wrong answer → retry → correct on same file
+	AchChatterbox = "chatterbox" // 10+ messages in one chat session
 )
 
 // AchievementInfo maps IDs to display names and descriptions.
 var AchievementInfo = map[string]struct{ Name, Desc string }{
-	AchFirstBlood:     {"First Blood", "answered your first question"},
-	AchScholar:        {"Scholar", "created your first knowledge file"},
-	AchOnFire3:        {"On Fire", "3 day streak"},
-	AchOnFire7:        {"Blazing", "7 day streak"},
-	AchOnFire14:       {"Unstoppable", "14 day streak"},
-	AchOnFire30:       {"Legend", "30 day streak"},
-	AchCentury:        {"Century", "100 questions answered"},
-	AchThousand:       {"Thousand", "1000 questions answered"},
+	// Milestones
+	AchFirstBlood: {"First Blood", "answered your first question"},
+	AchHalfCent:   {"Fifty", "50 questions answered"},
+	AchCentury:    {"Century", "100 questions answered"},
+	AchFiveHundo:  {"Five Hundred", "500 questions answered"},
+	AchThousand:   {"Thousand", "1000 questions answered"},
+	// Streaks
+	AchOnFire3:  {"On Fire", "3 day streak"},
+	AchOnFire7:  {"Blazing", "7 day streak"},
+	AchOnFire14: {"Unstoppable", "14 day streak"},
+	AchOnFire30: {"Legend", "30 day streak"},
+	// Combos
+	AchCombo3:  {"Triple", "3 correct in a row"},
+	AchCombo5:  {"Hot Streak", "5 correct in a row"},
+	AchCombo10: {"On a Roll", "10 correct in a row"},
+	AchCombo20: {"Flawless", "20 correct in a row"},
+	// Session
 	AchPerfectSession: {"Perfect", "all confidence 4-5 in a session"},
-	AchDeepDive:       {"Deep Dive", "5+ questions in a lesson chat"},
 	AchSpeedDemon:     {"Speed Demon", "10 questions in under 5 minutes"},
+	AchMarathon:       {"Marathon", "20+ questions in a session"},
+	AchDeepDive:       {"Deep Dive", "5+ questions in a lesson chat"},
+	// Learning
+	AchScholar:      {"Scholar", "created your first knowledge file"},
+	AchLibrarian:    {"Librarian", "25+ knowledge files in your bank"},
+	AchEncyclopedia: {"Encyclopedia", "100+ knowledge files"},
+	// Domains
+	AchExplorer:  {"Explorer", "3+ domains in one session"},
+	AchPolyglot:  {"Polyglot", "5+ domains in one session"},
+	AchSpecialist: {"Specialist", "mastered a domain (all files 4+)"},
+	// Confidence
+	AchFirstLock: {"Locksmith", "first file at confidence 5"},
+	AchTenLocked: {"Vault", "10 files locked at confidence 5"},
+	// Fun / rare
+	AchJackpot:    {"Jackpot", "hit a rare bonus drop"},
+	AchNightOwl:   {"Night Owl", "studying past midnight"},
+	AchEarlyBird:  {"Early Bird", "studying before 7am"},
+	AchComeback:   {"Comeback", "wrong → retry → nailed it"},
+	AchChatterbox: {"Chatterbox", "10+ messages in one chat"},
+}
+
+// AllAchievements returns all achievement IDs in display order.
+var AllAchievements = []string{
+	// Milestones
+	AchFirstBlood, AchHalfCent, AchCentury, AchFiveHundo, AchThousand,
+	// Streaks
+	AchOnFire3, AchOnFire7, AchOnFire14, AchOnFire30,
+	// Combos
+	AchCombo3, AchCombo5, AchCombo10, AchCombo20,
+	// Session
+	AchPerfectSession, AchSpeedDemon, AchMarathon, AchDeepDive,
+	// Learning
+	AchScholar, AchLibrarian, AchEncyclopedia,
+	// Domains
+	AchExplorer, AchPolyglot, AchSpecialist,
+	// Confidence
+	AchFirstLock, AchTenLocked,
+	// Fun / rare
+	AchJackpot, AchNightOwl, AchEarlyBird, AchComeback, AchChatterbox,
+}
+
+// AchievementContext holds everything needed to check achievement conditions.
+type AchievementContext struct {
+	SessionTotal    int
+	SessionMinConf  int
+	SessionDuration time.Duration
+	ChatQuestions   int
+	ComboMax        int
+	DomainCount     int
+	FileCount       int
+	LockedCount     int  // files at confidence 5
+	HitJackpot      bool // hit a jackpot bonus this question
+	IsComeback      bool // wrong → retry → correct on same file
 }
 
 // stateJSON is the on-disk format.
@@ -78,6 +173,9 @@ type stateJSON struct {
 	Achievements    []string              `json:"achievements,omitempty"`
 	Favorites       []string              `json:"favorites,omitempty"`
 	MaxQuestions    int                   `json:"max_questions,omitempty"`
+	ChallengeDiff   int                   `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	BrainPath       string                `json:"brain_path,omitempty"`
+	LogCalls        bool                  `json:"log_calls,omitempty"`
 }
 
 type State struct {
@@ -89,7 +187,10 @@ type State struct {
 	TotalQuestions  int
 	Achievements    []string
 	Favorites       map[string]bool
-	MaxQuestions    int // 0 = use default (5)
+	MaxQuestions    int    // 0 = use default (5)
+	ChallengeDiff   int    // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	BrainPath       string // user-configured knowledge path
+	LogCalls        bool   // log all ollama requests/responses to file
 	path            string
 }
 
@@ -144,6 +245,9 @@ func Load() (*State, error) {
 		s.Favorites[f] = true
 	}
 	s.MaxQuestions = v2.MaxQuestions
+	s.ChallengeDiff = v2.ChallengeDiff
+	s.BrainPath = v2.BrainPath
+	s.LogCalls = v2.LogCalls
 
 	// Migrate: compute confidence from old correct/wrong/streak if not set
 	for _, fs := range s.Files {
@@ -195,6 +299,9 @@ func (s *State) Save() error {
 		Achievements:    s.Achievements,
 		Favorites:       favs,
 		MaxQuestions:    s.MaxQuestions,
+		ChallengeDiff:   s.ChallengeDiff,
+		BrainPath:       s.BrainPath,
+		LogCalls:        s.LogCalls,
 	}
 	data, err := json.MarshalIndent(v2, "", "  ")
 	if err != nil {
@@ -315,6 +422,19 @@ func (s *State) FilesByConfidence(paths []string) []string {
 		return s.GetConfidence(sorted[i]) < s.GetConfidence(sorted[j])
 	})
 	return sorted
+}
+
+// AvgConfidence returns the average confidence across the given paths.
+// Unrated files (confidence 0) are included as 0.
+func (s *State) AvgConfidence(paths []string) float64 {
+	if len(paths) == 0 {
+		return 0
+	}
+	var total int
+	for _, p := range paths {
+		total += s.GetConfidence(p)
+	}
+	return float64(total) / float64(len(paths))
 }
 
 func (s *State) ensureFile(path string) *FileState {
@@ -508,41 +628,144 @@ func (s *State) UnlockAchievement(id string) bool {
 }
 
 // CheckAchievements checks all achievement conditions and returns newly unlocked IDs.
-func (s *State) CheckAchievements(sessionTotal, sessionMinConf int, sessionDuration time.Duration, chatQuestions int) []string {
+func (s *State) CheckAchievements(ctx AchievementContext) []string {
 	var unlocked []string
 
-	if s.TotalQuestions >= 1 && s.UnlockAchievement(AchFirstBlood) {
-		unlocked = append(unlocked, AchFirstBlood)
+	tryUnlock := func(id string) {
+		if s.UnlockAchievement(id) {
+			unlocked = append(unlocked, id)
+		}
 	}
-	if s.TotalQuestions >= 100 && s.UnlockAchievement(AchCentury) {
-		unlocked = append(unlocked, AchCentury)
+
+	// Milestones
+	if s.TotalQuestions >= 1 {
+		tryUnlock(AchFirstBlood)
 	}
-	if s.TotalQuestions >= 1000 && s.UnlockAchievement(AchThousand) {
-		unlocked = append(unlocked, AchThousand)
+	if s.TotalQuestions >= 50 {
+		tryUnlock(AchHalfCent)
 	}
-	if s.DayStreak >= 3 && s.UnlockAchievement(AchOnFire3) {
-		unlocked = append(unlocked, AchOnFire3)
+	if s.TotalQuestions >= 100 {
+		tryUnlock(AchCentury)
 	}
-	if s.DayStreak >= 7 && s.UnlockAchievement(AchOnFire7) {
-		unlocked = append(unlocked, AchOnFire7)
+	if s.TotalQuestions >= 500 {
+		tryUnlock(AchFiveHundo)
 	}
-	if s.DayStreak >= 14 && s.UnlockAchievement(AchOnFire14) {
-		unlocked = append(unlocked, AchOnFire14)
+	if s.TotalQuestions >= 1000 {
+		tryUnlock(AchThousand)
 	}
-	if s.DayStreak >= 30 && s.UnlockAchievement(AchOnFire30) {
-		unlocked = append(unlocked, AchOnFire30)
+
+	// Streaks
+	if s.DayStreak >= 3 {
+		tryUnlock(AchOnFire3)
 	}
-	if sessionTotal >= 3 && sessionMinConf >= 4 && s.UnlockAchievement(AchPerfectSession) {
-		unlocked = append(unlocked, AchPerfectSession)
+	if s.DayStreak >= 7 {
+		tryUnlock(AchOnFire7)
 	}
-	if sessionTotal >= 10 && sessionDuration < 5*time.Minute && s.UnlockAchievement(AchSpeedDemon) {
-		unlocked = append(unlocked, AchSpeedDemon)
+	if s.DayStreak >= 14 {
+		tryUnlock(AchOnFire14)
 	}
-	if chatQuestions >= 5 && s.UnlockAchievement(AchDeepDive) {
-		unlocked = append(unlocked, AchDeepDive)
+	if s.DayStreak >= 30 {
+		tryUnlock(AchOnFire30)
+	}
+
+	// Combos
+	if ctx.ComboMax >= 3 {
+		tryUnlock(AchCombo3)
+	}
+	if ctx.ComboMax >= 5 {
+		tryUnlock(AchCombo5)
+	}
+	if ctx.ComboMax >= 10 {
+		tryUnlock(AchCombo10)
+	}
+	if ctx.ComboMax >= 20 {
+		tryUnlock(AchCombo20)
+	}
+
+	// Session
+	if ctx.SessionTotal >= 3 && ctx.SessionMinConf >= 4 {
+		tryUnlock(AchPerfectSession)
+	}
+	if ctx.SessionTotal >= 10 && ctx.SessionDuration < 5*time.Minute {
+		tryUnlock(AchSpeedDemon)
+	}
+	if ctx.SessionTotal >= 20 {
+		tryUnlock(AchMarathon)
+	}
+	if ctx.ChatQuestions >= 5 {
+		tryUnlock(AchDeepDive)
+	}
+	if ctx.ChatQuestions >= 10 {
+		tryUnlock(AchChatterbox)
+	}
+
+	// Learning
+	if ctx.FileCount >= 25 {
+		tryUnlock(AchLibrarian)
+	}
+	if ctx.FileCount >= 100 {
+		tryUnlock(AchEncyclopedia)
+	}
+
+	// Domains
+	if ctx.DomainCount >= 3 {
+		tryUnlock(AchExplorer)
+	}
+	if ctx.DomainCount >= 5 {
+		tryUnlock(AchPolyglot)
+	}
+
+	// Confidence
+	if ctx.LockedCount >= 1 {
+		tryUnlock(AchFirstLock)
+	}
+	if ctx.LockedCount >= 10 {
+		tryUnlock(AchTenLocked)
+	}
+
+	// Fun / rare
+	if ctx.HitJackpot {
+		tryUnlock(AchJackpot)
+	}
+	if ctx.IsComeback {
+		tryUnlock(AchComeback)
+	}
+
+	// Time-based
+	hour := time.Now().Hour()
+	if hour >= 0 && hour < 5 {
+		tryUnlock(AchNightOwl)
+	}
+	if hour >= 5 && hour < 7 {
+		tryUnlock(AchEarlyBird)
 	}
 
 	return unlocked
+}
+
+// CountLocked returns the number of files at confidence 5.
+func (s *State) CountLocked() int {
+	count := 0
+	for _, fs := range s.Files {
+		if fs.Confidence >= 5 {
+			count++
+		}
+	}
+	return count
+}
+
+// IsDomainMastered returns true if all files in a domain are at confidence 4+.
+func (s *State) IsDomainMastered(paths []string, domainFn func(string) string, domain string) bool {
+	count := 0
+	for _, p := range paths {
+		if domainFn(p) == domain {
+			count++
+			if s.GetConfidence(p) < 4 {
+				return false
+			}
+		}
+	}
+	return count > 0
 }
 
 // CalcXP computes XP earned for a question given confidence, difficulty, streak, and staleness.

@@ -92,6 +92,11 @@ func TestQuestionQuality(t *testing.T) {
 		{"fill-blank", TypeFillBlank},
 		{"finish-code", TypeFinishCode},
 		{"multi-choice", TypeMultiChoice},
+		{"compare", TypeCompare},
+		{"scenario", TypeScenario},
+		{"ordering", TypeOrdering},
+		{"code-output", TypeCodeOutput},
+		{"debug", TypeDebug},
 	}
 
 	diffs := []Difficulty{DiffBasic, DiffIntermediate, DiffAdvanced}
@@ -339,3 +344,261 @@ E: The Go scheduler is cooperative, not preemptive.`,
 	}
 }
 
+func TestParseCompareScenarioDebug(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		qtype QuestionType
+		check func(*Question) error
+	}{
+		{
+			name:  "compare",
+			input: "Q: How do mutexes and channels differ?\nA: Mutexes protect shared memory with lock/unlock. Channels pass ownership.\nE: Think of mutexes as a lock, channels as passing a note.",
+			qtype: TypeCompare,
+			check: func(q *Question) error {
+				if !strings.Contains(q.Text, "mutex") {
+					return fmt.Errorf("missing key term in: %q", q.Text)
+				}
+				return nil
+			},
+		},
+		{
+			name:  "scenario",
+			input: "Q: You deploy a Go service that spawns a goroutine per request but never cancels them. Traffic spikes 10x. What happens?\nA: Goroutines accumulate and OOM.\nE: Goroutine leak.",
+			qtype: TypeScenario,
+			check: func(q *Question) error {
+				if q.Answer == "" {
+					return fmt.Errorf("empty answer")
+				}
+				return nil
+			},
+		},
+		{
+			name:  "code-output",
+			input: "Q: What does this code output?\nch := make(chan int, 2)\nch <- 1\nch <- 2\nfmt.Println(<-ch)\nA: 1\nE: Buffered channels are FIFO.",
+			qtype: TypeCodeOutput,
+			check: func(q *Question) error {
+				if !strings.Contains(q.Text, "chan") {
+					return fmt.Errorf("missing code in question: %q", q.Text)
+				}
+				return nil
+			},
+		},
+		{
+			name:  "debug",
+			input: "Q: What is the bug in this code?\nmu.Lock()\n*counter++\nif *counter > 100 {\n    return\n}\nmu.Unlock()\nA: Early return skips Unlock, causing deadlock. Fix: defer mu.Unlock().\nE: Classic forgot-to-unlock bug.",
+			qtype: TypeDebug,
+			check: func(q *Question) error {
+				if !strings.Contains(q.Text, "bug") {
+					return fmt.Errorf("missing 'bug' keyword in: %q", q.Text)
+				}
+				return nil
+			},
+		},
+		{
+			name: "ordering",
+			input: `Q: What is the correct order for setting up a Go module?
+A) go mod init → write code → go mod tidy → go build
+B) write code → go mod init → go build → go mod tidy
+C) go mod init → go build → write code → go mod tidy
+D) go build → go mod init → write code → go mod tidy
+ANSWER: A
+E: go mod init first, then code, tidy, build.`,
+			qtype: TypeOrdering,
+			check: func(q *Question) error {
+				if q.CorrectIdx != 0 {
+					return fmt.Errorf("expected correct=0, got %d", q.CorrectIdx)
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q, err := parseResponse(tt.input, tt.qtype)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := tt.check(q); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestParseChallengeGrade(t *testing.T) {
+	t.Run("clean challenge", func(t *testing.T) {
+		input := "TITLE: Reverse a String\nLANG: Go\n---\nWrite a function that reverses a string.\nExample: \"hello\" → \"olleh\""
+		ch, err := parseChallenge(input, DiffIntermediate)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ch.Title != "Reverse a String" {
+			t.Errorf("bad title: %q", ch.Title)
+		}
+		if ch.Language != "Go" {
+			t.Errorf("bad language: %q", ch.Language)
+		}
+		if !strings.Contains(ch.Description, "reverses") {
+			t.Errorf("bad description: %q", ch.Description)
+		}
+	})
+
+	t.Run("challenge missing lang", func(t *testing.T) {
+		input := "TITLE: FizzBuzz\n---\nWrite FizzBuzz."
+		ch, err := parseChallenge(input, DiffBasic)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ch.Language != "General" {
+			t.Errorf("expected General fallback, got: %q", ch.Language)
+		}
+	})
+
+	t.Run("challenge missing title", func(t *testing.T) {
+		_, err := parseChallenge("Just some random text", DiffBasic)
+		if err == nil {
+			t.Fatal("expected error for missing title")
+		}
+	})
+
+	t.Run("clean grade", func(t *testing.T) {
+		input := "SCORE: 85\nCORRECT: yes\nEFFICIENCY: optimal\n---\nGood solution, handles edge cases well."
+		g, err := parseChallengeGrade(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if g.Score != 85 {
+			t.Errorf("bad score: %d", g.Score)
+		}
+		if !g.Correct {
+			t.Error("expected correct=true")
+		}
+		if g.Efficiency != "optimal" {
+			t.Errorf("bad efficiency: %q", g.Efficiency)
+		}
+		if !strings.Contains(g.Feedback, "edge cases") {
+			t.Errorf("bad feedback: %q", g.Feedback)
+		}
+	})
+
+	t.Run("grade with lowercase correct", func(t *testing.T) {
+		input := "SCORE: 40\nCORRECT: no\nEFFICIENCY: suboptimal\n---\nMissing edge case handling."
+		g, err := parseChallengeGrade(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if g.Correct {
+			t.Error("expected correct=false")
+		}
+	})
+
+	t.Run("grade empty", func(t *testing.T) {
+		_, err := parseChallengeGrade("")
+		if err == nil {
+			t.Fatal("expected error for empty grade")
+		}
+	})
+}
+
+func TestParseAnswerGrade(t *testing.T) {
+	t.Run("correct answer", func(t *testing.T) {
+		input := "CORRECT: yes\n---\nYou nailed it — goroutines are indeed lightweight threads managed by the Go runtime, not OS threads."
+		g, err := parseAnswerGrade(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !g.Correct {
+			t.Error("expected correct=true")
+		}
+		if !strings.Contains(g.Feedback, "goroutines") {
+			t.Errorf("bad feedback: %q", g.Feedback)
+		}
+	})
+
+	t.Run("incorrect answer", func(t *testing.T) {
+		input := "CORRECT: no\n---\nYou're thinking of threads, but the concept here is different. Consider how Go schedules work units internally."
+		g, err := parseAnswerGrade(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if g.Correct {
+			t.Error("expected correct=false")
+		}
+		if !strings.Contains(g.Feedback, "threads") {
+			t.Errorf("bad feedback: %q", g.Feedback)
+		}
+	})
+
+	t.Run("with code fences", func(t *testing.T) {
+		input := "```\nCORRECT: yes\n---\nGood understanding of closures.\n```"
+		g, err := parseAnswerGrade(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !g.Correct {
+			t.Error("expected correct=true")
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		g, err := parseAnswerGrade("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if g.Correct {
+			t.Error("expected correct=false for empty")
+		}
+	})
+}
+
+// TestLiveChallenge tests challenge generation + grading with a real Ollama instance.
+// Run with: UNROT_TEST_OLLAMA=1 go test -v -run TestLiveChallenge -count=1 ./internal/ollama/
+func TestLiveChallenge(t *testing.T) {
+	if os.Getenv("UNROT_TEST_OLLAMA") == "" {
+		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
+	}
+
+	c := New()
+	t.Logf("Model: %s", c.model)
+
+	diffs := []Difficulty{DiffBasic, DiffIntermediate, DiffAdvanced}
+	domains := []string{"", "Go", "Python"}
+
+	for _, domain := range domains {
+		for _, diff := range diffs {
+			name := fmt.Sprintf("domain=%s/diff=%s", domain, diff)
+			if domain == "" {
+				name = fmt.Sprintf("domain=any/diff=%s", diff)
+			}
+			t.Run(name, func(t *testing.T) {
+				ch, err := c.GenerateChallenge(domain, diff)
+				if err != nil {
+					t.Fatalf("GenerateChallenge failed: %v", err)
+				}
+				t.Logf("\nTitle: %s\nLang: %s\nDesc: %s", ch.Title, ch.Language, ch.Description)
+
+				if ch.Title == "" {
+					t.Error("FAIL: empty title")
+				}
+				if ch.Description == "" {
+					t.Error("FAIL: empty description")
+				}
+
+				// Grade a dummy submission
+				code := "// placeholder solution\nfunc solve() {}"
+				grade, err := c.GradeChallenge(ch, code)
+				if err != nil {
+					t.Fatalf("GradeChallenge failed: %v", err)
+				}
+				t.Logf("Score: %d, Correct: %v, Efficiency: %s\nFeedback: %s",
+					grade.Score, grade.Correct, grade.Efficiency, grade.Feedback)
+
+				if grade.Feedback == "" {
+					t.Error("WARN: no feedback generated")
+				}
+			})
+		}
+	}
+}

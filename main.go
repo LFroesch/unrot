@@ -4,8 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
+
+	"github.com/LFroesch/unrot/internal/state"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -16,12 +17,10 @@ func main() {
 
 	brainPath := os.Getenv("SECOND_BRAIN")
 	if brainPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+		if st, err := state.Load(); err == nil && st.BrainPath != "" {
+			brainPath = st.BrainPath
 		}
-		brainPath = filepath.Join(home, "projects", "active", "daily_use", "SECOND_BRAIN")
+		// brainPath may still be "" — app handles it gracefully
 	}
 
 	// Optional domain filter: `unrot docker` or `unrot -n 5 docker`

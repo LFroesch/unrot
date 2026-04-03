@@ -9,11 +9,24 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Client struct {
-	host  string
-	model string
+	host   string
+	model  string
+	sem    chan struct{} // capacity 1: serializes concurrent requests
+	logMu  sync.Mutex
+	logger io.Writer // optional — logs every request/response when set
+}
+
+// SetLogger enables request/response logging to w (e.g. an open *os.File).
+// Pass nil to disable.
+func (c *Client) SetLogger(w io.Writer) {
+	c.logMu.Lock()
+	c.logger = w
+	c.logMu.Unlock()
 }
 
 func New() *Client {
@@ -27,7 +40,7 @@ func New() *Client {
 	if model == "" {
 		model = "qwen2.5:7b"
 	}
-	return &Client{host: host, model: model}
+	return &Client{host: host, model: model, sem: make(chan struct{}, 1)}
 }
 
 type chatRequest struct {
@@ -90,7 +103,6 @@ func (t QuestionType) UsesTypedAnswer() bool {
 	return t != TypeMultiChoice && t != TypeOrdering
 }
 
-
 type Difficulty int
 
 const (
@@ -140,6 +152,22 @@ type Message struct {
 
 // AllTypes returns the full set of question types for random selection.
 var AllTypes = []QuestionType{TypeFlashcard, TypeExplain, TypeFillBlank, TypeFinishCode, TypeMultiChoice, TypeCompare, TypeScenario, TypeOrdering, TypeCodeOutput, TypeDebug}
+
+// Challenge represents a standalone coding challenge (not tied to a knowledge file).
+type Challenge struct {
+	Title       string
+	Description string
+	Language    string
+	Difficulty  Difficulty
+}
+
+// ChallengeGrade is ollama's evaluation of a challenge submission.
+type ChallengeGrade struct {
+	Score      int // 0-100
+	Correct    bool
+	Efficiency string // "optimal", "acceptable", "suboptimal"
+	Feedback   string
+}
 
 // GenerateQuestion generates a question of the given type. If qtype is -1, picks randomly.
 func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, diff Difficulty) (*Question, error) {
@@ -209,6 +237,7 @@ Rules:
 - Include the WHY — not just "don't do X" but "X fails because..."
 
 ## Connections
+- requires: domain/slug (list hard prerequisites the reader should know first, e.g. "- requires: go/goroutines")
 - How this relates to other concepts the developer likely knows
 - When to use this vs alternatives, with concrete decision criteria
 
@@ -277,10 +306,18 @@ Rules:
 
 func difficultyClause(d Difficulty) string {
 	shared := `
-IMPORTANT:
-- Do NOT copy sentences from the document verbatim as a question — rephrase and test understanding
-- Focus on a DIFFERENT aspect each time — vary which section/concept you target
-- The question should require THINKING, not just pattern-matching against the text`
+CRITICAL — ANSWER PROTECTION:
+- NEVER include the answer, or a close paraphrase of it, anywhere in the question text
+- NEVER use phrasing like "What is X?" when X is literally stated as a definition in the document — rephrase to test understanding from a different angle
+- If the question mentions a concept, do NOT also mention the answer concept in the same sentence
+- The user will try again if they get it wrong, so making it guessable defeats the purpose
+
+VARIETY & QUALITY:
+- Pick a RANDOM section/bullet from the document — do NOT always target the first or most obvious fact
+- Rephrase using your own words — never copy document sentences into the question
+- The question should require THINKING, not pattern-matching against the text
+- Wrong options (if MC) must be plausible — no obviously wrong filler
+- Prefer questions that test "would you recognize this in practice" over "can you recite the definition"`
 
 	switch d {
 	case DiffAdvanced:
@@ -296,13 +333,14 @@ IMPORTANT:
 	default:
 		return `Difficulty: BASIC
 - Ask about core concepts, key definitions, or fundamental "what does X do"
+- Keep in mind the user is a beginner, so dont ask things that are too advanced for them.
 - Keep it approachable — one clear concept per question
 - The answer should be something concrete, not a vague explanation` + shared
 	}
 }
 
 func explanationClause() string {
-	return `E: <explanation — TEACH the concept in 2-4 sentences. Include a concrete example (code, input→output, or before→after). Explain WHY, not just WHAT. Must be factually correct. Can span multiple lines.>`
+	return `E: <explanation — TEACH the concept in 2-4 sentences. Include a concrete example (code, input→output, or before→after). Explain WHY, not just WHAT. Must be factually correct. Can span multiple lines. DO NOT GIVE AWAY THE ANSWER IN THE EXPLANATION.>`
 }
 
 func promptFor(t QuestionType, diff Difficulty) string {
@@ -577,6 +615,9 @@ func (c *Client) Chat(system, user string) (string, error) {
 }
 
 func (c *Client) chatMulti(messages []message) (string, error) {
+	c.sem <- struct{}{}
+	defer func() { <-c.sem }()
+
 	body := chatRequest{
 		Model:    c.model,
 		Messages: messages,
@@ -603,7 +644,29 @@ func (c *Client) chatMulti(messages []message) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
 		return "", err
 	}
-	return cr.Message.Content, nil
+
+	result := cr.Message.Content
+
+	c.logMu.Lock()
+	w := c.logger
+	c.logMu.Unlock()
+	if w != nil {
+		var lb strings.Builder
+		lb.WriteString("\n---\n")
+		lb.WriteString(time.Now().Format("2006-01-02 15:04:05"))
+		lb.WriteString("\n")
+		for _, msg := range messages {
+			lb.WriteString(fmt.Sprintf("[%s]\n%s\n\n", strings.ToUpper(msg.Role), msg.Content))
+		}
+		lb.WriteString("[RESPONSE]\n")
+		lb.WriteString(result)
+		lb.WriteString("\n")
+		if _, err := fmt.Fprint(w, lb.String()); err != nil {
+			fmt.Fprintf(os.Stderr, "unrot: log write failed: %v\n", err)
+		}
+	}
+
+	return result, nil
 }
 
 func parseResponse(text string, qtype QuestionType) (*Question, error) {
@@ -661,6 +724,27 @@ func parseQA(text string, qtype QuestionType) (*Question, error) {
 	if q == "" || a == "" {
 		return nil, fmt.Errorf("failed to parse Q/A from ollama response:\n%s", text)
 	}
+
+	// Fix fill-blank questions where the LLM forgot to blank out the answer.
+	// Replace the answer word in the question with ___ so the user sees a blank.
+	if qtype == TypeFillBlank && !strings.Contains(q, "___") {
+		lq := strings.ToLower(q)
+		la := strings.ToLower(a)
+		// Try exact match first
+		if idx := strings.Index(lq, la); idx >= 0 {
+			q = q[:idx] + "___" + q[idx+len(a):]
+		} else {
+			// Try bold/backtick-wrapped variants: **answer**, *answer*, `answer`
+			for _, wrap := range []string{"**%s**", "*%s*", "`%s`"} {
+				wrapped := fmt.Sprintf(wrap, a)
+				if idx := strings.Index(strings.ToLower(q), strings.ToLower(wrapped)); idx >= 0 {
+					q = q[:idx] + "___" + q[idx+len(wrapped):]
+					break
+				}
+			}
+		}
+	}
+
 	return &Question{Type: qtype, Text: q, Answer: a, Explanation: e}, nil
 }
 
@@ -728,4 +812,203 @@ func parseMultiChoice(text string) (*Question, error) {
 		CorrectIdx:  correctIdx,
 		Explanation: e,
 	}, nil
+}
+
+// GenerateChallenge creates a standalone coding challenge (not tied to a knowledge file).
+func (c *Client) GenerateChallenge(domain string, diff Difficulty) (*Challenge, error) {
+	domainCtx := "any programming language (vary between Go, Python, JavaScript, Rust)"
+	if domain != "" {
+		domainCtx = fmt.Sprintf("focused on %s", domain)
+	}
+
+	system := fmt.Sprintf(`You are a coding challenge generator for a developer practice tool.
+Generate ONE standalone coding challenge — %s.
+%s
+
+Vary the challenge type across calls:
+- Syntax: "Write the correct syntax for..." (quick, specific)
+- Mini function: "Write a function that..." (medium, focused)
+- Algorithm: "Implement an efficient solution for..." (longer, analytical)
+- Debug: "Fix the bug in this code..." (reading + fixing)
+- Code output: "What does this output? Then rewrite it to..." (tracing + coding)
+
+Output EXACTLY this format:
+TITLE: <short title, 3-8 words>
+LANG: <language name>
+---
+<clear problem description>
+<include input/output examples where helpful>
+<state any constraints or requirements>
+
+Rules:
+- Problems should be solvable in 5-30 lines of code
+- Be specific — include concrete examples with expected input/output
+- For algorithm problems, state expected time/space complexity
+- Do NOT wrap the entire output in markdown code fences
+- Code examples within the description should use plain text (no backticks)`, domainCtx, difficultyClause(diff))
+
+	resp, err := c.Chat(system, "Generate a challenge.")
+	if err != nil {
+		return nil, err
+	}
+	return parseChallenge(resp, diff)
+}
+
+// AnswerGrade is ollama's evaluation of a typed answer.
+type AnswerGrade struct {
+	Correct  bool
+	Feedback string
+}
+
+// GradeAnswer evaluates a typed answer against the correct answer.
+func (c *Client) GradeAnswer(question, correctAnswer, userAnswer string) (*AnswerGrade, error) {
+	system := fmt.Sprintf(`You are grading a quiz answer.
+
+The correct answer (INTERNAL — NEVER quote, paraphrase, or give this away in your feedback):
+%s
+
+Focus on whether the user demonstrates understanding of the key concept — don't require exact wording.
+Accept answers that are substantially correct even if phrased differently.
+Be strict about factual accuracy but lenient about completeness.
+
+Output EXACTLY this format:
+CORRECT: <yes/no>
+---
+<2-3 sentences of educational feedback:
+- If CORRECT: explain WHY their answer is right — what concept they demonstrated, what makes it work. Reinforce the learning.
+- If WRONG: describe what's off about THEIR reasoning — what they confused, overlooked, or mixed up. Do NOT name the correct answer, do NOT say "the answer is..." or "you should have said...". Instead, ask a guiding question or point them toward the right concept area so they can figure it out themselves.>
+
+CRITICAL: Your feedback must NEVER contain the correct answer, a synonym of it, or a rephrasing. The user will retry — giving it away defeats the purpose.`, correctAnswer)
+
+	user := fmt.Sprintf("Question: %s\n\nUser's answer: %s", question, userAnswer)
+
+	resp, err := c.Chat(system, user)
+	if err != nil {
+		return nil, err
+	}
+	return parseAnswerGrade(resp)
+}
+
+func parseAnswerGrade(text string) (*AnswerGrade, error) {
+	text = strings.TrimSpace(text)
+	text = stripCodeFences(text)
+	grade := &AnswerGrade{}
+
+	lines := strings.Split(text, "\n")
+	feedbackStart := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(trimmed, "CORRECT:"); ok {
+			val := strings.ToLower(strings.TrimSpace(after))
+			grade.Correct = val == "yes" || val == "true"
+		} else if trimmed == "---" {
+			feedbackStart = i + 1
+			break
+		}
+	}
+
+	if feedbackStart >= 0 && feedbackStart < len(lines) {
+		grade.Feedback = strings.TrimSpace(strings.Join(lines[feedbackStart:], "\n"))
+	}
+	return grade, nil
+}
+
+// GradeChallenge evaluates a user's code submission against a challenge.
+func (c *Client) GradeChallenge(challenge *Challenge, code string) (*ChallengeGrade, error) {
+	system := `You are grading a coding challenge submission. You cannot execute the code — evaluate by reading.
+
+Evaluate:
+1. Correctness: Would this code produce the right result for all inputs? Check edge cases.
+2. Efficiency: Is the approach optimal? What's the time/space complexity?
+3. Code quality: Is it clean, idiomatic, well-structured?
+
+Output EXACTLY this format:
+SCORE: <0-100>
+CORRECT: <yes/no>
+EFFICIENCY: <optimal/acceptable/suboptimal>
+---
+<2-5 sentences of specific feedback: what's right, what could break, how to improve. Be educational.>`
+
+	user := fmt.Sprintf("Challenge: %s\n\n%s\n\nSubmitted code:\n%s", challenge.Title, challenge.Description, code)
+
+	resp, err := c.Chat(system, user)
+	if err != nil {
+		return nil, err
+	}
+	return parseChallengeGrade(resp)
+}
+
+func parseChallenge(text string, diff Difficulty) (*Challenge, error) {
+	text = strings.TrimSpace(text)
+	text = stripCodeFences(text)
+	ch := &Challenge{Difficulty: diff}
+
+	lines := strings.Split(text, "\n")
+	descStart := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(trimmed, "TITLE:"); ok {
+			ch.Title = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(trimmed, "LANG:"); ok {
+			ch.Language = strings.TrimSpace(after)
+		} else if trimmed == "---" {
+			descStart = i + 1
+			break
+		}
+	}
+
+	if descStart >= 0 && descStart < len(lines) {
+		ch.Description = strings.TrimSpace(strings.Join(lines[descStart:], "\n"))
+	} else if ch.Title != "" {
+		// No --- separator — everything after LANG line is description
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "LANG:") {
+				if i+1 < len(lines) {
+					ch.Description = strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+				}
+				break
+			}
+		}
+	}
+
+	if ch.Title == "" || ch.Description == "" {
+		return nil, fmt.Errorf("failed to parse challenge from ollama response:\n%s", text)
+	}
+	if ch.Language == "" {
+		ch.Language = "General"
+	}
+	return ch, nil
+}
+
+func parseChallengeGrade(text string) (*ChallengeGrade, error) {
+	text = strings.TrimSpace(text)
+	text = stripCodeFences(text)
+	grade := &ChallengeGrade{}
+
+	lines := strings.Split(text, "\n")
+	feedbackStart := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(trimmed, "SCORE:"); ok {
+			fmt.Sscanf(strings.TrimSpace(after), "%d", &grade.Score)
+		} else if after, ok := strings.CutPrefix(trimmed, "CORRECT:"); ok {
+			val := strings.ToLower(strings.TrimSpace(after))
+			grade.Correct = val == "yes" || val == "true"
+		} else if after, ok := strings.CutPrefix(trimmed, "EFFICIENCY:"); ok {
+			grade.Efficiency = strings.TrimSpace(after)
+		} else if trimmed == "---" {
+			feedbackStart = i + 1
+			break
+		}
+	}
+
+	if feedbackStart >= 0 && feedbackStart < len(lines) {
+		grade.Feedback = strings.TrimSpace(strings.Join(lines[feedbackStart:], "\n"))
+	}
+
+	// Allow partial parses — at minimum we need some feedback
+	if grade.Score == 0 && grade.Feedback == "" {
+		return nil, fmt.Errorf("failed to parse challenge grade from ollama response:\n%s", text)
+	}
+	return grade, nil
 }

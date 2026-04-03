@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -25,7 +27,7 @@ const (
 	minTerminalHeight = 15
 )
 
-// --- Phases (7 total) ---
+// --- Phases (9 total) ---
 
 type phase int
 
@@ -36,6 +38,8 @@ const (
 	phaseLearn                  // learn input + generation + review
 	phaseStats                  // full stats view
 	phaseSettings               // settings page (quiz types, etc.)
+	phaseChallenge              // coding challenge mode (not tied to knowledge files)
+	phaseViewer                 // read-only knowledge file viewer
 	phaseDone                   // session recap
 	phaseError                  // error display
 )
@@ -63,6 +67,19 @@ const (
 	learnReview                      // viewport with generated content
 )
 
+// --- Challenge sub-states ---
+
+type challengeStep int
+
+const (
+	challengeInput   challengeStep = iota // describe what to practice (learnTA)
+	challengeChat                         // conversational clarification  with ollama
+	challengeLoading                      // generating challenge (spinner)
+	challengeWorking                      // user writing code (textarea)
+	challengeGrading                      // ollama evaluating (spinner)
+	challengeResult                       // showing feedback + score
+)
+
 // --- Question tabs (during stepQuestion) ---
 
 type questionTab int
@@ -71,6 +88,17 @@ const (
 	qTabQuiz      questionTab = iota // question + answer input
 	qTabChat                         // inline concept chat
 	qTabKnowledge                    // source material
+)
+
+// --- Challenge tabs (during challengeWorking/challengeResult) ---
+
+type challengeTabType int
+
+const (
+	cTabCode        challengeTabType = iota // code textarea (working) or submitted code (result)
+	cTabChat                                // inline concept chat
+	cTabProblem                             // full problem description
+	cTabExplanation                         // feedback + grade (result only)
 )
 
 // --- Overlay modes ---
@@ -102,8 +130,19 @@ const (
 )
 
 type chatEntry struct {
-	role    string // "user" or "assistant"
-	content string
+	role       string // "user" or "assistant"
+	content    string
+	durationMs int64 // ms to receive response (assistant only)
+}
+
+// Chat slash commands — typed in chat textarea, expanded before sending to ollama
+var chatSlashCmds = map[string]string{
+	"/examples": "explain this with concrete examples — show real code or real input→output",
+	"/eli5":     "explain this like I'm five — use a simple analogy, no jargon",
+	"/gotchas":  "what are the common mistakes, gotchas, or edge cases with this?",
+	"/compare":  "compare this with similar or related concepts — what's different and why?",
+	"/why":      "why does this matter in practice? when would I actually use this?",
+	"/deep":     "go deeper — explain the underlying mechanism and internals",
 }
 
 type model struct {
@@ -117,6 +156,7 @@ type model struct {
 
 	// All discovered files
 	allFiles []string
+	depGraph *knowledge.DepGraph
 
 	// Current phase + sub-states
 	phase     phase
@@ -128,20 +168,27 @@ type model struct {
 	overlayViewport viewport.Model
 
 	// Quiz state
-	reviewFiles []string // files for review (sorted by confidence)
-	fileIdx     int
-	currentQ    *ollama.Question
-	currentFile string
-	grade           gradeKind // gradeCorrect, gradePartial, gradeWrong
-	ratedConfidence int       // 0=not yet rated, 1-5=user confidence pick
-	mcPicked        int       // multiple choice: selected option index
-	retryQueue  []string
-	retryPhase  bool // true when working through retry queue
-	retryCount  map[string]int
-
+	reviewFiles     []string // files for review (sorted by confidence)
+	fileIdx         int
+	currentQ        *ollama.Question
+	currentFile     string
+	lastQType       ollama.QuestionType // cached from last question (persists through loading/lesson)
+	lastQDiff       ollama.Difficulty   // cached from last question
+	lastQSet        bool                // true once a question has been received this session
+	grade           gradeKind           // gradeCorrect, gradePartial, gradeWrong
+	ratedConfidence int                 // 0=not yet rated, 1-5=user confidence pick
+	mcPicked        int                 // multiple choice: selected option index
+	mcEliminated    [4]bool             // MC options eliminated by wrong picks
+	mcWrongPicks    int                 // wrong MC attempts before reveal (max 2)
+	answerRevealed  bool                // typed: true once answer/explanation should show
+	gradeFeedback   string              // ollama's feedback on typed answer
+	retryQueue      []string
+	retryPhase      bool // true when working through retry queue
+	retryCount      map[string]int
 
 	// Topic list (browse/pick)
 	pickMode      bool
+	viewerMode    bool // true when browsing for reading (v), not quizzing
 	pickCursor    int
 	pickFiles     []string
 	pickSearch    textinput.Model
@@ -157,7 +204,8 @@ type model struct {
 	activeTypes []bool // which types are enabled (indexed by AllTypes)
 
 	// Settings page
-	settingsCursor int
+	settingsCursor  int
+	settingsEditing bool // true when editing brain path in settings
 
 	// Typed answer — textarea
 	answerTA textarea.Model
@@ -191,26 +239,53 @@ type model struct {
 	// Explain-more inline loading
 	explainLoading bool
 
-	// XP / achievements
-	toast       string             // achievement notification (cleared on next keypress)
-	xpGained    int                // XP gained this action (for display)
-	xpBreakdown state.XPBreakdown  // breakdown of last XP award (for display)
-	sessionMinConf int // minimum confidence rated this session (for perfect session achievement)
-	learnChatCount int // questions asked in current lesson chat (for deep dive achievement)
-	levelUpFrom int    // previous level before XP award (0 = no level up pending)
-	comboCount  int    // consecutive correct answers (reset on wrong)
-	comboMax    int    // best combo this session
+	// Knowledge audit + fix
+	auditLoading    bool   // waiting for ollama audit response
+	auditResult     string // audit verdict (shown in knowledge overlay/tab)
+	auditFixPending string // corrected file content waiting for user confirmation
+	auditFixLoading bool   // generating the fix
 
+	// Bank notes preview (ctrl+b flow)
+	bankPending string // generated notes waiting for user confirmation
+	bankLoading bool   // waiting for ollama to generate summary
+
+	// Saved textarea content across tab switches
+	savedQuizInput     string // quiz answer textarea content saved when switching away
+	savedChatInput     string // chat textarea content saved when switching away
+	savedChallengeCode string // challenge code textarea content saved when switching away
+
+	// XP / achievements
+	toast          string            // achievement notification (cleared on next keypress)
+	xpGained       int               // XP gained this action (for display)
+	xpBreakdown    state.XPBreakdown // breakdown of last XP award (for display)
+	sessionMinConf int               // minimum confidence rated this session (for perfect session achievement)
+	learnChatCount int               // questions asked in current lesson chat (for deep dive achievement)
+	levelUpFrom    int               // previous level before XP award (0 = no level up pending)
+	comboCount     int               // consecutive correct answers (reset on wrong)
+	comboMax       int               // best combo this session
+
+	// Challenge mode
+	challengeStep    challengeStep
+	challengeTab     challengeTabType // active tab during working/result
+	currentChallenge *ollama.Challenge
+	challengeGrade   *ollama.ChallengeGrade
+	challengeCount   int               // challenges completed this session
+	challengeDiff    ollama.Difficulty // adaptive difficulty for challenges
+	challengeCode    string            // submitted code (for viewing on result)
+	challengeExplain string            // expanded explanation from `e` key on result
 
 	// Daily goal
 	dailyGoal int
 
+	// Lifecycle
+	loaded bool // true after first stateLoadedMsg
+
 	// Export report
 	reportPath string
 
-	// Prefetch
-	nextQ    *ollama.Question // pre-cached next question
-	nextFile string           // file the prefetch is for
+	// Logging
+	logFile        *os.File
+	logQuestionNum int
 
 	// Stats
 	sessionCorrect int
@@ -231,7 +306,10 @@ type model struct {
 
 func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) model {
 	sp := spinner.New()
-	sp.Spinner = spinner.Dot
+	sp.Spinner = spinner.Spinner{
+		Frames: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+		FPS:    time.Second / 12,
+	}
 	sp.Style = lipgloss.NewStyle().Foreground(colorAccent)
 
 	ansTA := textarea.New()
@@ -512,7 +590,6 @@ func (m *model) syncDomainOverlay() {
 	}
 }
 
-
 // domainAvgConfidence returns the average confidence for files in a domain.
 func (m model) domainAvgConfidence(domain string) float64 {
 	if m.state == nil {
@@ -599,7 +676,7 @@ func renderMarkdown(content string, w int) string {
 				b.WriteString("\n")
 			}
 		case inCodeBlock:
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorYellow).Render(line))
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render(highlightSyntax(line)))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "## "):
 			header := strings.TrimPrefix(trimmed, "## ")
@@ -640,7 +717,7 @@ func renderExplanation(content string, w int) string {
 				b.WriteString("\n")
 			}
 		case inCodeBlock:
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorYellow).Render(line))
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render(highlightSyntax(line)))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "## "):
 			header := strings.TrimPrefix(trimmed, "## ")
@@ -712,11 +789,165 @@ func renderInline(text string, base ...lipgloss.Style) string {
 				continue
 			}
 		}
-		plain.WriteByte(text[i])
-		i++
+		r, size := utf8.DecodeRuneInString(text[i:])
+		plain.WriteRune(r)
+		i += size
 	}
 	flushPlain()
 	return b.String()
+}
+
+// --- Syntax highlighting for code blocks ---
+
+var codeKeywords = map[string]bool{
+	// Go
+	"func": true, "return": true, "if": true, "else": true, "for": true,
+	"range": true, "var": true, "const": true, "type": true, "struct": true,
+	"interface": true, "switch": true, "case": true, "default": true,
+	"go": true, "defer": true, "select": true, "chan": true, "map": true,
+	"import": true, "package": true, "break": true, "continue": true,
+	"nil": true, "true": true, "false": true, "make": true, "new": true,
+	"append": true, "len": true, "cap": true, "delete": true, "close": true,
+	"panic": true, "recover": true,
+	// Python
+	"def": true, "class": true, "self": true, "print": true, "from": true,
+	"while": true, "try": true, "except": true, "finally": true, "with": true,
+	"as": true, "yield": true, "lambda": true, "in": true, "not": true,
+	"and": true, "or": true, "is": true, "async": true, "await": true,
+	"None": true, "True": true, "False": true, "pass": true, "raise": true,
+	// JS/TS
+	"let": true, "function": true, "console": true, "require": true,
+	"export": true, "throw": true, "catch": true, "typeof": true,
+	"instanceof": true, "this": true, "null": true, "undefined": true,
+	"void": true, "static": true, "extends": true, "implements": true,
+	// Rust
+	"fn": true, "mut": true, "pub": true, "impl": true,
+	"trait": true, "enum": true, "match": true, "mod": true, "use": true,
+	"crate": true, "super": true, "where": true, "unsafe": true,
+	"move": true, "ref": true, "loop": true,
+	// SQL (uppercase — matches convention, avoids collisions with select/from/where in other langs)
+	"SELECT": true, "FROM": true, "WHERE": true, "INSERT": true, "UPDATE": true,
+	"DELETE": true, "CREATE": true, "ALTER": true, "DROP": true, "TABLE": true,
+	"INDEX": true, "JOIN": true, "LEFT": true, "RIGHT": true, "INNER": true,
+	"OUTER": true, "ON": true, "AND": true, "OR": true, "NOT": true,
+	"IN": true, "EXISTS": true, "GROUP": true, "BY": true, "ORDER": true,
+	"HAVING": true, "LIMIT": true, "OFFSET": true, "AS": true, "SET": true,
+	"VALUES": true, "INTO": true, "DISTINCT": true, "BETWEEN": true,
+	"LIKE": true, "NULL": true, "PRIMARY": true, "KEY": true, "FOREIGN": true,
+	"REFERENCES": true, "CONSTRAINT": true, "BEGIN": true, "COMMIT": true,
+	"ROLLBACK": true, "TRANSACTION": true, "UNION": true, "ALL": true,
+	// Shell/Bash
+	"echo": true, "grep": true, "sed": true, "awk": true, "curl": true,
+	"wget": true, "chmod": true, "chown": true, "mkdir": true, "sudo": true,
+	"apt": true, "yum": true, "pip": true, "npm": true, "yarn": true,
+	"git": true, "docker": true, "kubectl": true,
+	"fi": true, "do": true, "done": true, "then": true, "elif": true,
+	// Docker
+	"COPY": true, "RUN": true, "CMD": true, "ENTRYPOINT": true, "EXPOSE": true,
+	"ENV": true, "ARG": true, "WORKDIR": true, "VOLUME": true,
+	// HTML/CSS (distinct enough to not collide with variable names)
+	"DOCTYPE": true, "getElementById": true, "querySelector": true,
+	"addEventListener": true, "innerHTML": true, "className": true,
+	// Shared
+	"string": true, "int": true, "float": true, "bool": true, "byte": true,
+	"error": true, "fmt": true, "os": true,
+}
+
+// highlightSyntax applies basic keyword/string/comment/number coloring to a code line.
+func highlightSyntax(line string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(line) {
+		// Comments: // or #
+		if i+1 < len(line) && line[i] == '/' && line[i+1] == '/' {
+			b.WriteString(dimStyle.Render(line[i:]))
+			return b.String()
+		}
+		if line[i] == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			b.WriteString(dimStyle.Render(line[i:]))
+			return b.String()
+		}
+		// Strings
+		if line[i] == '"' || line[i] == '\'' || line[i] == '`' {
+			quote := line[i]
+			end := strings.IndexByte(line[i+1:], quote)
+			if end >= 0 {
+				b.WriteString(lipgloss.NewStyle().Foreground(colorPrimary).Render(line[i : i+2+end]))
+				i = i + 2 + end
+				continue
+			}
+		}
+		// Identifiers / keywords
+		if isCodeLetter(line[i]) {
+			j := i
+			for j < len(line) && (isCodeLetter(line[j]) || isCodeDigit(line[j])) {
+				j++
+			}
+			word := line[i:j]
+			if codeKeywords[word] {
+				b.WriteString(lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(word))
+			} else {
+				b.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render(word))
+			}
+			i = j
+			continue
+		}
+		// Numbers
+		if isCodeDigit(line[i]) {
+			j := i
+			for j < len(line) && (isCodeDigit(line[j]) || line[j] == '.' || line[j] == 'x') {
+				j++
+			}
+			b.WriteString(lipgloss.NewStyle().Foreground(colorWarn).Render(line[i:j]))
+			i = j
+			continue
+		}
+		// Operators / punctuation — subtle
+		b.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render(string(line[i])))
+		i++
+	}
+	return b.String()
+}
+
+func isCodeLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+func isCodeDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+// rollCasinoBonus generates a random XP bonus with tiered drop rates.
+// Combo count amplifies the bonus. Returns bonus amount and whether jackpot was hit.
+func rollCasinoBonus(comboCount int) (bonus int, hitJackpot bool) {
+	bonus = 3 + rand.Intn(6) // 3-8 always
+	roll := rand.Intn(100)
+	if roll < 3 {
+		bonus += 50 + rand.Intn(51)
+		hitJackpot = true
+	} else if roll < 15 {
+		bonus += 20 + rand.Intn(21)
+	} else if roll < 35 {
+		bonus += 8 + rand.Intn(13)
+	}
+	if comboCount >= 2 {
+		bonus = int(float64(bonus) * (1.0 + float64(comboCount)*0.15))
+	}
+	return bonus, hitJackpot
+}
+
+// openNotesOverlay opens the notes editor overlay for the current file.
+func (m *model) openNotesOverlay() {
+	if m.currentFile == "" {
+		return
+	}
+	notes := knowledge.ExtractNotes(m.sourceContent)
+	m.answerTA.SetHeight(10)
+	m.answerTA.CharLimit = 2000
+	m.answerTA.Placeholder = "add notes about this topic..."
+	m.answerTA.SetValue(notes)
+	m.answerTA.Focus()
+	m.activeOverlay = overlayNotes
 }
 
 // divider renders a labeled section divider line.

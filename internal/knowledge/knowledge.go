@@ -127,6 +127,49 @@ func UpdateNotes(brainPath, relPath, notes string) error {
 	return os.WriteFile(absPath, []byte(content), 0644)
 }
 
+// ParsePrereqs extracts prerequisite references from the ## Connections section.
+// Looks for lines matching "- requires: domain/slug" and returns normalized paths.
+func ParsePrereqs(content string) []string {
+	const marker = "## Connections"
+	idx := strings.Index(content, marker)
+	if idx < 0 {
+		return nil
+	}
+	rest := content[idx+len(marker):]
+	// Stop at next ## section
+	if nextH2 := strings.Index(rest, "\n## "); nextH2 >= 0 {
+		rest = rest[:nextH2]
+	}
+	var prereqs []string
+	for _, line := range strings.Split(rest, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "- requires:") && !strings.HasPrefix(line, "* requires:") {
+			continue
+		}
+		// Extract the value after "requires:"
+		parts := strings.SplitN(line, "requires:", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		ref := strings.TrimSpace(parts[1])
+		if ref == "" {
+			continue
+		}
+		prereqs = append(prereqs, ResolvePrereqPath(ref))
+	}
+	return prereqs
+}
+
+// ResolvePrereqPath normalizes a prerequisite reference to a relative path.
+// "go/goroutines" → "knowledge/go/goroutines.md"
+// "knowledge/go/goroutines.md" → "knowledge/go/goroutines.md" (pass-through)
+func ResolvePrereqPath(ref string) string {
+	ref = strings.TrimSpace(ref)
+	ref = strings.TrimPrefix(ref, "knowledge/")
+	ref = strings.TrimSuffix(ref, ".md")
+	return "knowledge/" + ref + ".md"
+}
+
 // FilterByDomain returns only paths matching the given domain.
 func FilterByDomain(paths []string, domain string) []string {
 	var result []string

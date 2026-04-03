@@ -95,3 +95,16 @@ func scrollHint(vp viewport.Model) string {
 	}
 	return headerDimStyle.Render(hint)
 }
+
+// formatDuration formats seconds into a human-readable string (e.g. "1h 23m", "45m", "2m").
+func formatDuration(totalSec int) string {
+	if totalSec < 60 {
+		return fmt.Sprintf("%ds", totalSec)
+	}
+	h := totalSec / 3600
+	m := (totalSec % 3600) / 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
