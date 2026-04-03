@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"go.dalton.dog/bubbleup"
 
 	"github.com/LFroesch/unrot/internal/knowledge"
 	"github.com/LFroesch/unrot/internal/ollama"
@@ -17,10 +18,32 @@ import (
 )
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadState(m.brainPath), m.spinner.Tick)
+	return tea.Batch(loadState(m.brainPath), m.spinner.Tick, m.alerts.Init())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Route all messages through bubbleup for timer/dismiss handling
+	var alertCmd tea.Cmd
+	if m.alerts != nil {
+		updatedAlerts, cmd := m.alerts.Update(msg)
+		if am, ok := updatedAlerts.(bubbleup.AlertModel); ok {
+			m.alerts = &am
+		}
+		alertCmd = cmd
+	}
+	newM, cmd := m.update(msg)
+	// Flush any queued alert cmds from queueAlert() calls
+	if mm, ok := newM.(model); ok {
+		cmd = mm.flushAlerts(cmd)
+		newM = mm
+	}
+	if alertCmd != nil {
+		return newM, tea.Batch(cmd, alertCmd)
+	}
+	return newM, cmd
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -171,9 +194,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clipboardMsg:
 		if msg.ok {
-			m.toast = "copied to clipboard"
+			(&m).queueAlert(alertHint, "copied to clipboard")
 		} else {
-			m.toast = "clipboard not available"
+			(&m).queueAlert(alertHint, "clipboard not available")
 		}
 		return m, nil
 
@@ -209,6 +232,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.learnChatLoading = false
 		return m, nil
 
+	case challengeChatMsg:
+		m.challengeChatHistory = append(m.challengeChatHistory, chatEntry{role: "assistant", content: msg.text})
+		m.challengeChatLoading = false
+		return m, nil
+
 	case learnContentMsg:
 		m.learnContent = msg.content
 		if msg.domain != "" {
@@ -232,14 +260,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.xpGained = 50
 		if m.state.UnlockAchievement(state.AchScholar) {
 			info := state.AchievementInfo[state.AchScholar]
-			m.toast = fmt.Sprintf("achievement unlocked: %s — %s", info.Name, info.Desc)
+			(&m).queueAlert(alertAchievement, fmt.Sprintf("%s — %s", info.Name, info.Desc))
 		}
 		newAch := m.state.CheckAchievements(state.AchievementContext{
 			FileCount: len(m.allFiles) + 1,
 		})
 		if len(newAch) > 0 {
 			info := state.AchievementInfo[newAch[0]]
-			m.toast = fmt.Sprintf("achievement unlocked: %s — %s", info.Name, info.Desc)
+			(&m).queueAlert(alertAchievement, fmt.Sprintf("%s — %s", info.Name, info.Desc))
 		}
 		m.state.Save()
 		m.phase = phaseQuiz
@@ -276,7 +304,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.challengeCode = ""
 		m.savedChallengeCode = ""
 		m.savedChatInput = ""
+		// Seed concept chat with pre-question conversation so chat tab shows it
 		m.conceptChat = nil
+		for _, e := range m.challengeChatHistory {
+			m.conceptChat = append(m.conceptChat, chatEntry{role: e.role, content: e.content})
+		}
 		m.conceptChatLoading = false
 		m.answerTA.Reset()
 		m.answerTA.SetHeight(12)
@@ -310,6 +342,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.xpBreakdown = breakdown
 		m.challengeCount++
 		m.sessionTotal++
+		if m.domainFilter != "" {
+			m.sessionDomains[m.domainFilter] = true
+		} else if m.currentChallenge != nil && m.currentChallenge.Language != "" {
+			m.sessionDomains[m.currentChallenge.Language] = true
+		}
 		if msg.grade.Correct {
 			m.sessionCorrect++
 		} else {
@@ -329,8 +366,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		newLevel := m.state.Level()
 		if newLevel > prevLevel {
 			m.levelUpFrom = prevLevel
-			m.toast = fmt.Sprintf("LEVEL UP! Lv.%d → Lv.%d", prevLevel, newLevel)
+			(&m).queueAlert(alertLevelUp, fmt.Sprintf("LEVEL UP! Lv.%d → Lv.%d", prevLevel, newLevel))
 		}
+		(&m).syncSessionRecordToState()
 		m.state.Save()
 		m.syncViewport()
 		return m, nil
@@ -444,11 +482,11 @@ func (m *model) handleAuditFixKey(key string) (bool, tea.Cmd) {
 		content := m.auditFixPending
 		m.auditFixPending = ""
 		m.auditResult = ""
-		m.toast = "saved fixed version"
+		m.queueAlert(alertHint, "saved fixed version")
 		return true, saveAuditFixCmd(m.brainPath, m.currentFile, content)
 	case "esc":
 		m.auditFixPending = ""
-		m.toast = "discarded fix"
+		m.queueAlert(alertHint, "discarded fix")
 		m.setActiveViewportContent(renderMarkdown(m.sourceContent, m.activeViewportWidth()), true)
 		return true, nil
 	}
@@ -499,7 +537,7 @@ func (m *model) handleBankPreviewKey(key string) (bool, tea.Cmd) {
 		}
 		merged += m.bankPending
 		m.bankPending = ""
-		m.toast = "banked chat insights to notes"
+		m.queueAlert(alertHint, "banked chat insights to notes")
 		return true, saveNotesCmd(m.brainPath, m.currentFile, merged)
 	case "r":
 		m.bankPending = ""
@@ -508,7 +546,7 @@ func (m *model) handleBankPreviewKey(key string) (bool, tea.Cmd) {
 		return true, bankChatToNotesCmd(m.ollama, m.conceptChat, m.brainPath, m.currentFile, m.sourceContent)
 	case "esc":
 		m.bankPending = ""
-		m.toast = "discarded bank notes"
+		m.queueAlert(alertHint, "discarded bank notes")
 		return true, nil
 	}
 	return false, nil
@@ -547,6 +585,7 @@ func (m *model) sendConceptChat(contextSource string, syncFn func()) tea.Cmd {
 }
 
 // nextChallengeCmd resets challenge state and generates the next challenge.
+// If the session started with a chat topic, generates from that context; otherwise random.
 func (m *model) nextChallengeCmd() tea.Cmd {
 	m.challengeGrade = nil
 	m.challengeExplain = ""
@@ -555,6 +594,9 @@ func (m *model) nextChallengeCmd() tea.Cmd {
 	m.challengeStep = challengeLoading
 	m.clearAuditState()
 	openQuestionLog(m)
+	if m.challengeTopic != "" && len(m.challengeChatHistory) > 0 {
+		return generateChallengeFromChatCmd(m.ollama, m.challengeTopic, m.challengeChatHistory, m.challengeDiff)
+	}
 	return generateChallengeCmd(m.ollama, m.domainFilter, m.challengeDiff)
 }
 
@@ -589,6 +631,10 @@ func (m *model) setActiveViewportContent(content string, toTop bool) {
 // Chrome: header(1) + \n(1) + \n(1) + status(1) = 4
 func (m model) contentHeight() int {
 	h := m.height - 4
+	// Account for tab bar line in header when active
+	if m.headerTabBar() != "" {
+		h--
+	}
 	if h < 5 {
 		h = 5
 	}
@@ -802,7 +848,6 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 		return m, nil
 	case "i":
 		m.resetSession()
-		m.challengeStep = challengeLoading
 		m.challengeCount = 0
 		m.challengeExplain = ""
 		switch m.state.ChallengeDiff {
@@ -817,9 +862,15 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 		}
 		m.currentChallenge = nil
 		m.challengeGrade = nil
+		m.challengeTopic = ""
+		m.challengeChatHistory = nil
+		m.challengeChatLoading = false
+		m.challengeStep = challengeInput
+		m.learnTA.Reset()
+		m.learnTA.Placeholder = "e.g. binary search in Go, React hooks, SQL joins..."
+		m.learnTA.Focus()
 		m.phase = phaseChallenge
-		openQuestionLog(&m)
-		return m, generateChallengeCmd(m.ollama, m.domainFilter, m.challengeDiff)
+		return m, nil
 	case "s":
 		m.phase = phaseSettings
 		m.settingsCursor = 0
@@ -832,7 +883,7 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 	case "F":
 		favFiles := m.state.FavoritePaths(m.allFiles)
 		if len(favFiles) == 0 {
-			m.toast = "no favorites — press f in topic list to mark some"
+			(&m).queueAlert(alertHint, "no favorites — press f in topic list")
 			return m, nil
 		}
 		m.reviewFiles = m.state.FilesByPriority(favFiles)
@@ -853,6 +904,9 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 		m.openDomainOverlay()
 		return m, nil
 	case "q":
+		if m.state != nil {
+			m.state.Save()
+		}
 		return m, tea.Quit
 	}
 	return m, nil
@@ -949,9 +1003,9 @@ func (m model) handleTopicList(msg tea.KeyMsg) (model, tea.Cmd) {
 			faved := m.state.ToggleFavorite(file)
 			m.state.Save()
 			if faved {
-				m.toast = "★ favorited"
+				(&m).queueAlert(alertHint, "★ favorited")
 			} else {
-				m.toast = "unfavorited"
+				(&m).queueAlert(alertHint, "unfavorited")
 			}
 		}
 	case "x":
@@ -1254,7 +1308,7 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.syncViewport()
 				return m, nil
 			}
-			m.toast = "not quite — try again"
+			(&m).queueAlert(alertHint, "not quite — try again")
 			return m, nil
 		case key == "esc":
 			if m.pickMode {
@@ -1281,7 +1335,7 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.gradeFeedback = ""
 		m.questionTab = qTabQuiz
 		m.quizStep = stepGrading
-		return m, gradeAnswerCmd(m.ollama, m.currentQ.Text, m.currentQ.Answer, m.userAnswer)
+		return m, gradeAnswerCmd(m.ollama, m.currentQ.Type, m.currentQ.Text, m.currentQ.Answer, m.userAnswer)
 	case key == "esc":
 		m.answerTA.Reset()
 		if m.pickMode {
@@ -1382,7 +1436,7 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 		newLevel := m.state.Level()
 		if newLevel > prevLevel {
 			m.levelUpFrom = prevLevel
-			m.toast = fmt.Sprintf("LEVEL UP! Lv.%d → Lv.%d", prevLevel, newLevel)
+			(&m).queueAlert(alertLevelUp, fmt.Sprintf("LEVEL UP! Lv.%d → Lv.%d", prevLevel, newLevel))
 		}
 
 		// Comeback detection: wrong on this file before, correct now
@@ -1414,15 +1468,12 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 				}
 			}
 		}
-		if len(newAch) > 0 {
-			info := state.AchievementInfo[newAch[0]]
-			if m.levelUpFrom > 0 {
-				m.toast += " · " + info.Name
-			} else {
-				m.toast = fmt.Sprintf("achievement unlocked: %s — %s", info.Name, info.Desc)
-			}
+		for _, id := range newAch {
+			info := state.AchievementInfo[id]
+			(&m).queueAlert(alertAchievement, fmt.Sprintf("%s — %s", info.Name, info.Desc))
 		}
 
+		(&m).syncSessionRecordToState()
 		m.state.Save()
 		m.syncViewport()
 		return m, nil
@@ -1518,6 +1569,7 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 			}
 			xp, _ := state.CalcXP(conf, diffLevel, m.state.DayStreak, staleDays)
 			m.state.TotalXP += xp
+			(&m).syncSessionRecordToState()
 			m.state.Save()
 		}
 		if m.pickMode {
@@ -1984,6 +2036,73 @@ func (m model) handleChallenge(msg tea.KeyMsg) (model, tea.Cmd) {
 	key := msg.String()
 	m.toast = ""
 	switch m.challengeStep {
+	case challengeInput:
+		switch key {
+		case "esc":
+			m.goHome()
+			return m, nil
+		case "enter":
+			topic := strings.TrimSpace(m.learnTA.Value())
+			if topic == "" {
+				// No topic = random challenge (original behavior)
+				m.challengeStep = challengeLoading
+				openQuestionLog(&m)
+				return m, generateChallengeCmd(m.ollama, m.domainFilter, m.challengeDiff)
+			}
+			m.challengeTopic = topic
+			m.challengeChatHistory = nil
+			m.challengeChatLoading = true
+			m.challengeStep = challengeChat
+			m.learnTA.Reset()
+			m.learnTA.Placeholder = "answer or press g to generate..."
+			m.learnTA.Focus()
+			openQuestionLog(&m)
+			return m, challengeClarifyCmd(m.ollama, topic, nil)
+		default:
+			var cmd tea.Cmd
+			m.learnTA, cmd = m.learnTA.Update(msg)
+			return m, cmd
+		}
+
+	case challengeChat:
+		if m.challengeChatLoading {
+			if key == "esc" {
+				m.challengeChatLoading = false
+				m.challengeStep = challengeInput
+				m.learnTA.Reset()
+				m.learnTA.Placeholder = "e.g. binary search in Go, React hooks, SQL joins..."
+				m.learnTA.Focus()
+				return m, nil
+			}
+			return m, nil
+		}
+		switch key {
+		case "ctrl+g":
+			m.challengeStep = challengeLoading
+			return m, generateChallengeFromChatCmd(m.ollama, m.challengeTopic, m.challengeChatHistory, m.challengeDiff)
+		case "enter":
+			response := strings.TrimSpace(m.learnTA.Value())
+			if response == "" {
+				return m, nil
+			}
+			m.challengeChatHistory = append(m.challengeChatHistory, chatEntry{role: "user", content: response})
+			m.learnTA.Reset()
+			m.learnTA.Focus()
+			m.challengeChatLoading = true
+			return m, challengeClarifyCmd(m.ollama, m.challengeTopic, m.challengeChatHistory)
+		case "esc":
+			m.challengeStep = challengeInput
+			m.learnTA.Reset()
+			m.learnTA.Placeholder = "e.g. binary search in Go, React hooks, SQL joins..."
+			m.learnTA.Focus()
+			m.challengeChatHistory = nil
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.learnTA, cmd = m.learnTA.Update(msg)
+			return m, cmd
+		}
+
 	case challengeLoading, challengeGrading:
 		if key == "esc" {
 			m.goHome()

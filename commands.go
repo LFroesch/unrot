@@ -83,6 +83,8 @@ type challengeGradeMsg struct {
 type auditMsg struct{ text string }
 type auditFixMsg struct{ content string }
 
+type challengeChatMsg struct{ text string }
+
 type challengeExplainMsg struct{ text string }
 
 type clipboardMsg struct{ ok bool }
@@ -153,21 +155,23 @@ Rules:
 
 func challengeExplainCmd(client *ollama.Client, challenge *ollama.Challenge, grade *ollama.ChallengeGrade, code string) tea.Cmd {
 	return func() tea.Msg {
-		system := `You are a tutor explaining a coding challenge solution.
+		system := `You are a tutor explaining a coding challenge.
 Rules:
 - Start with the core concept being tested in one sentence
-- Show the ideal solution with a brief code example
-- Explain WHY that approach works — the underlying mechanism
-- Mention any edge cases or gotchas
+- Explain WHY the right approach works — the underlying mechanism
+- Mention key edge cases or gotchas the user should think about
+- Give directional hints: what pattern to use, what to watch out for
+- Do NOT show the full correct solution or complete code — the user should write it themselves
+- You may show small snippets (1-2 lines) to illustrate a specific concept, but never the full answer
 - Keep it to 6-10 sentences total
-- Use markdown: **bold** key terms, fenced code blocks, bullet lists
+- Use markdown: **bold** key terms, fenced code blocks for snippets, bullet lists
 - Every fact must be correct`
 
 		user := fmt.Sprintf("Challenge: %s\n%s\n\nSubmitted code:\n%s", challenge.Title, challenge.Description, code)
 		if grade != nil && grade.Feedback != "" {
 			user += fmt.Sprintf("\n\nGrade feedback: %s", grade.Feedback)
 		}
-		user += "\n\nTeach me the concept and show the ideal solution."
+		user += "\n\nTeach me the concept and guide me toward the right approach without showing the full solution."
 
 		resp, err := client.Chat(system, user)
 		if err != nil {
@@ -212,9 +216,15 @@ func copyToClipboardCmd(text string) tea.Cmd {
 	}
 }
 
-func gradeAnswerCmd(client *ollama.Client, question, correctAnswer, userAnswer string) tea.Cmd {
+func gradeAnswerCmd(client *ollama.Client, qType ollama.QuestionType, question, correctAnswer, userAnswer string) tea.Cmd {
 	return func() tea.Msg {
-		grade, err := client.GradeAnswer(question, correctAnswer, userAnswer)
+		var grade *ollama.AnswerGrade
+		var err error
+		if qType == ollama.TypeFinishCode {
+			grade, err = client.GradeFinishCode(question, correctAnswer, userAnswer)
+		} else {
+			grade, err = client.GradeAnswer(question, correctAnswer, userAnswer)
+		}
 		if err != nil {
 			return errMsg{err}
 		}
@@ -534,6 +544,47 @@ func (m model) exportReportCmd() tea.Cmd {
 		}
 
 		return reportSavedMsg{path: path}
+	}
+}
+
+func challengeClarifyCmd(client *ollama.Client, topic string, history []chatEntry) tea.Cmd {
+	return func() tea.Msg {
+		system := `You are helping a developer choose what coding challenge to practice.
+Given their topic and any conversation so far, ask 1-2 clarifying questions to understand:
+- Their current level (beginner/intermediate/advanced)
+- What specific area they want to drill (syntax, algorithms, debugging, etc.)
+- Any language preference
+
+Rules:
+- Keep it conversational — 2-3 sentences max
+- If you already have enough context, say: "Got it. Press g to generate your challenge."
+- Don't repeat questions they already answered`
+
+		msgs := make([]ollama.Message, 0, len(history)+1)
+		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to practice: %s", topic)})
+		for _, h := range history {
+			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
+		}
+
+		resp, err := client.ChatWithHistory(system, msgs)
+		if err != nil {
+			return errMsg{err}
+		}
+		return challengeChatMsg{text: resp}
+	}
+}
+
+func generateChallengeFromChatCmd(client *ollama.Client, topic string, history []chatEntry, diff ollama.Difficulty) tea.Cmd {
+	return func() tea.Msg {
+		msgs := make([]ollama.Message, len(history))
+		for i, h := range history {
+			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
+		}
+		ch, err := client.GenerateChallengeFromChat(topic, msgs, diff)
+		if err != nil {
+			return errMsg{err}
+		}
+		return challengeGenMsg{challenge: ch}
 	}
 }
 

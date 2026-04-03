@@ -28,6 +28,7 @@ func (m *model) resetSession() {
 	m.sessionWrongs = nil
 	m.sessionStart = time.Now()
 	m.sessionDomains = make(map[string]bool)
+	m.sessionRecordIdx = -1
 	m.retryQueue = nil
 	m.retryPhase = false
 	m.retryCount = nil
@@ -203,18 +204,30 @@ func (m *model) nextQuestion() tea.Cmd {
 	return m.finishSession()
 }
 
-// savePartialSession records an in-progress session toward the daily goal if any
-// questions were answered. Safe to call multiple times — resets sessionTotal after saving.
-func (m *model) savePartialSession() {
-	if m.sessionTotal > 0 {
-		var domains []string
-		for d := range m.sessionDomains {
-			domains = append(domains, d)
-		}
-		m.state.RecordSession(m.sessionCorrect, m.sessionWrong, domains, time.Since(m.sessionStart))
-		m.state.Save()
-		m.sessionTotal = 0 // prevent double-recording
+// syncSessionRecordToState writes current session counters to state.Sessions (upsert).
+func (m *model) syncSessionRecordToState() {
+	if m.state == nil || m.sessionTotal <= 0 {
+		return
 	}
+	domains := make([]string, 0, len(m.sessionDomains))
+	for d := range m.sessionDomains {
+		domains = append(domains, d)
+	}
+	sort.Strings(domains)
+	dur := int(time.Since(m.sessionStart).Seconds())
+	m.state.UpsertSessionRecord(&m.sessionRecordIdx, m.sessionCorrect, m.sessionWrong, domains, dur)
+}
+
+// savePartialSession flushes session stats and clears in-memory session counters.
+// Per-question saves also call syncSessionRecordToState so stats survive abrupt exit.
+func (m *model) savePartialSession() {
+	if m.state == nil || m.sessionTotal <= 0 {
+		return
+	}
+	m.syncSessionRecordToState()
+	m.state.Save()
+	m.sessionTotal = 0
+	m.sessionRecordIdx = -1
 }
 
 func (m *model) finishSession() tea.Cmd {

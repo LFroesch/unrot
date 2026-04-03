@@ -446,32 +446,47 @@ func (s *State) ensureFile(path string) *FileState {
 	return fs
 }
 
-// RecordSession appends a session record and updates the daily streak.
-func (s *State) RecordSession(correct, wrong int, domains []string, duration time.Duration) {
+// UpsertSessionRecord persists running session stats for the active quiz/challenge run.
+// activeIdx is the index in Sessions for this run, or -1 if no row exists yet (append).
+// Call after each completed question so state.json stays accurate if the app exits before goHome.
+func (s *State) UpsertSessionRecord(activeIdx *int, correct, wrong int, domains []string, durationSec int) {
 	today := time.Now().Format("2006-01-02")
+	total := correct + wrong
+	sort.Strings(domains)
+
+	canUpdate := *activeIdx >= 0 && *activeIdx < len(s.Sessions) && s.Sessions[*activeIdx].Date == today
+	if canUpdate {
+		sr := &s.Sessions[*activeIdx]
+		sr.Correct = correct
+		sr.Wrong = wrong
+		sr.Total = total
+		sr.Domains = append([]string(nil), domains...)
+		sr.DurationSec = durationSec
+		return
+	}
+
 	s.Sessions = append(s.Sessions, SessionRecord{
 		Date:        today,
 		Correct:     correct,
 		Wrong:       wrong,
-		Total:       correct + wrong,
-		Domains:     domains,
-		DurationSec: int(duration.Seconds()),
+		Total:       total,
+		Domains:     append([]string(nil), domains...),
+		DurationSec: durationSec,
 	})
+	*activeIdx = len(s.Sessions) - 1
 
-	if s.LastSessionDate == today {
-		// Already tracked today, streak unchanged
-		return
+	// First persisted activity for this calendar day — update streak
+	if s.LastSessionDate != today {
+		yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+		if s.LastSessionDate == yesterday {
+			s.DayStreak++
+		} else if s.LastSessionDate == "" {
+			s.DayStreak = 1
+		} else {
+			s.DayStreak = 1 // streak broken
+		}
+		s.LastSessionDate = today
 	}
-
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	if s.LastSessionDate == yesterday {
-		s.DayStreak++
-	} else if s.LastSessionDate == "" {
-		s.DayStreak = 1
-	} else {
-		s.DayStreak = 1 // streak broken
-	}
-	s.LastSessionDate = today
 }
 
 // refreshStreak corrects the streak if days have been missed since last session.
@@ -497,6 +512,15 @@ func (s *State) TodaySessions() []SessionRecord {
 		}
 	}
 	return result
+}
+
+// TodayQuestionCount returns total questions recorded across today's sessions.
+func (s *State) TodayQuestionCount() int {
+	n := 0
+	for _, sr := range s.TodaySessions() {
+		n += sr.Total
+	}
+	return n
 }
 
 // WeekActivity returns question counts for the last 7 days (index 0 = 6 days ago, 6 = today).

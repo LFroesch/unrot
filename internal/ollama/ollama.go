@@ -854,10 +854,87 @@ Rules:
 	return parseChallenge(resp, diff)
 }
 
+// GenerateChallengeFromChat creates a challenge based on a conversational topic clarification.
+func (c *Client) GenerateChallengeFromChat(topic string, history []Message, diff Difficulty) (*Challenge, error) {
+	system := fmt.Sprintf(`You are a coding challenge generator for a developer practice tool.
+Based on the conversation below, generate ONE standalone coding challenge tailored to what the user wants to practice.
+%s
+
+Vary the challenge type:
+- Syntax: "Write the correct syntax for..." (quick, specific)
+- Mini function: "Write a function that..." (medium, focused)
+- Algorithm: "Implement an efficient solution for..." (longer, analytical)
+- Debug: "Fix the bug in this code..." (reading + fixing)
+- Code output: "What does this output? Then rewrite it to..." (tracing + coding)
+
+Output EXACTLY this format:
+TITLE: <short title, 3-8 words>
+LANG: <language name>
+---
+<clear problem description>
+<include input/output examples where helpful>
+<state any constraints or requirements>
+
+Rules:
+- Problems should be solvable in 5-30 lines of code
+- Be specific — include concrete examples with expected input/output
+- For algorithm problems, state expected time/space complexity
+- Do NOT wrap the entire output in markdown code fences
+- Code examples within the description should use plain text (no backticks)`, difficultyClause(diff))
+
+	msgs := make([]Message, 0, len(history)+1)
+	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("I want to practice: %s", topic)})
+	for _, h := range history {
+		msgs = append(msgs, Message{Role: h.Role, Content: h.Content})
+	}
+	msgs = append(msgs, Message{Role: "user", Content: "Generate the challenge now."})
+
+	resp, err := c.ChatWithHistory(system, msgs)
+	if err != nil {
+		return nil, err
+	}
+	return parseChallenge(resp, diff)
+}
+
 // AnswerGrade is ollama's evaluation of a typed answer.
 type AnswerGrade struct {
 	Correct  bool
 	Feedback string
+}
+
+// GradeFinishCode evaluates a code-completion answer against the expected line.
+// snippet is the full code context (with // ??? placeholder), expectedLine is the model answer.
+func (c *Client) GradeFinishCode(snippet, expectedLine, userAnswer string) (*AnswerGrade, error) {
+	system := fmt.Sprintf(`You are grading a code-completion quiz question.
+
+The code snippet (shown to the user with // ??? as the blank):
+%s
+
+The model answer (INTERNAL — NEVER reveal this):
+%s
+
+Rules:
+- Accept ANY implementation that is semantically equivalent or achieves the same correct result.
+- Do NOT require exact syntax match — different but equally valid code is CORRECT.
+- Be strict about semantic correctness: wrong behavior, missing keywords, or broken logic = WRONG.
+- Small style differences (spacing, variable names) are fine if behavior is correct.
+
+Output EXACTLY this format:
+CORRECT: <yes/no>
+---
+<2-3 sentences of feedback:
+- If CORRECT: explain what their code does and why it works in this context. Reinforce the concept.
+- If WRONG: describe what the code they wrote would actually do (or fail to do) in context. Point at the specific concept or keyword they need — do NOT name or quote the correct answer. Give a directional code hint (e.g. "think about how X prevents Y" or "you need a mechanism that Z").>
+
+CRITICAL: Never reveal the model answer, never say "the answer is", never quote or paraphrase the expected line.`, snippet, expectedLine)
+
+	user := fmt.Sprintf("User's code: %s", userAnswer)
+
+	resp, err := c.Chat(system, user)
+	if err != nil {
+		return nil, err
+	}
+	return parseAnswerGrade(resp)
 }
 
 // GradeAnswer evaluates a typed answer against the correct answer.
@@ -922,12 +999,14 @@ Evaluate:
 2. Efficiency: Is the approach optimal? What's the time/space complexity?
 3. Code quality: Is it clean, idiomatic, well-structured?
 
+CRITICAL: Do NOT reveal the correct solution or full answer in your feedback. Point out what's wrong or could break, give directional hints, but never show the fix or correct code. The user should figure it out themselves.
+
 Output EXACTLY this format:
 SCORE: <0-100>
 CORRECT: <yes/no>
 EFFICIENCY: <optimal/acceptable/suboptimal>
 ---
-<2-5 sentences of specific feedback: what's right, what could break, how to improve. Be educational.>`
+<2-5 sentences of specific feedback: what's right, what could break, directional hints for improvement. Never show corrected code or the full solution.>`
 
 	user := fmt.Sprintf("Challenge: %s\n\n%s\n\nSubmitted code:\n%s", challenge.Title, challenge.Description, code)
 

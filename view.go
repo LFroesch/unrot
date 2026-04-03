@@ -87,7 +87,7 @@ func (m model) View() string {
 	content := m.renderContent()
 	status := m.renderStatus()
 
-	// Toast notification
+	// Inline hint toast (audit prompts, etc.)
 	toastLine := ""
 	if m.toast != "" {
 		toastLine = lipgloss.NewStyle().
@@ -104,6 +104,11 @@ func (m model) View() string {
 	if m.activeOverlay != overlayNone {
 		overlay := m.renderOverlay()
 		base = placeOverlay(base, overlay)
+	}
+
+	// Bubbleup notification overlay (level-ups, achievements, XP)
+	if m.alerts != nil {
+		base = m.alerts.Render(base)
 	}
 
 	return base
@@ -136,8 +141,9 @@ func (m model) renderHeader() string {
 			}
 			parts = append(parts, headerStreakStyle.Render(xpText))
 		}
-		// Streak multiplier (always show if > 1.0)
+		// Day streak + XP multiplier (same semantics as dashboard / stats)
 		if m.state.DayStreak > 0 {
+			parts = append(parts, headerStreakStyle.Render(fmt.Sprintf("%dd", m.state.DayStreak)))
 			mult := 1.0 + float64(m.state.DayStreak)*0.1
 			if mult > 2.0 {
 				mult = 2.0
@@ -155,9 +161,9 @@ func (m model) renderHeader() string {
 	if m.phase == phaseChallenge {
 		if m.currentChallenge != nil {
 			parts = append(parts, headerAccentStyle.Render(m.currentChallenge.Language))
-			if m.currentChallenge.Difficulty > 0 {
-				parts = append(parts, m.headerDiffStyle(m.currentChallenge.Difficulty))
-			}
+			parts = append(parts, m.headerDiffStyle(m.currentChallenge.Difficulty))
+		} else if m.challengeTopic != "" {
+			parts = append(parts, headerAccentStyle.Render(m.challengeTopic))
 		}
 		parts = append(parts, headerWarnStyle.Render("challenge"))
 	} else if m.phase == phaseViewer {
@@ -167,17 +173,37 @@ func (m model) renderHeader() string {
 		}
 		parts = append(parts, headerDimStyle.Render("viewer"))
 	} else {
-		domain := m.currentDomain()
-		if domain != "" {
-			parts = append(parts, headerAccentStyle.Render(domain))
-		}
-		if m.phase == phaseQuiz && m.currentFile != "" {
-			slug := strings.TrimSuffix(filepath.Base(m.currentFile), ".md")
-			parts = append(parts, headerDimStyle.Render(slug))
-		}
-		if m.phase == phaseQuiz && m.lastQSet {
-			parts = append(parts, headerWarnStyle.Render(m.lastQType.String()))
-			if m.lastQDiff > 0 {
+		switch m.phase {
+		case phaseDashboard, phaseTopicList:
+			if m.domainFilter != "" {
+				parts = append(parts, headerAccentStyle.Render(m.domainFilter))
+			} else {
+				parts = append(parts, headerDimStyle.Render("all"))
+			}
+		case phaseStats:
+			parts = append(parts, headerDimStyle.Render("stats"))
+		case phaseSettings:
+			parts = append(parts, headerDimStyle.Render("settings"))
+		case phaseLearn:
+			if m.learnDomain != "" {
+				parts = append(parts, headerAccentStyle.Render(m.learnDomain))
+			}
+			parts = append(parts, headerDimStyle.Render("learn"))
+		case phaseDone:
+			parts = append(parts, headerDimStyle.Render("session done"))
+		case phaseError:
+			parts = append(parts, headerDimStyle.Render("error"))
+		default:
+			domain := m.currentDomain()
+			if domain != "" {
+				parts = append(parts, headerAccentStyle.Render(domain))
+			}
+			if m.phase == phaseQuiz && m.currentFile != "" {
+				slug := strings.TrimSuffix(filepath.Base(m.currentFile), ".md")
+				parts = append(parts, headerDimStyle.Render(slug))
+			}
+			if m.phase == phaseQuiz && m.lastQSet {
+				parts = append(parts, headerWarnStyle.Render(m.lastQType.String()))
 				parts = append(parts, m.headerDiffStyle(m.lastQDiff))
 			}
 		}
@@ -189,6 +215,12 @@ func (m model) renderHeader() string {
 	left := strings.Join(parts, headerDimStyle.Render(" · "))
 
 	var rightParts []string
+	// Persisted activity today (dashboard + stats — matches daily goal / recent sections)
+	if m.state != nil && (m.phase == phaseDashboard || m.phase == phaseStats) {
+		if n := m.state.TodayQuestionCount(); n > 0 {
+			rightParts = append(rightParts, headerStatsStyle.Render(fmt.Sprintf("today %dq", n)))
+		}
+	}
 	// Session elapsed time (during quiz or challenge)
 	if !m.sessionStart.IsZero() && (m.phase == phaseQuiz || m.phase == phaseChallenge || m.phase == phaseDone) {
 		elapsed := int(time.Since(m.sessionStart).Seconds())
@@ -210,7 +242,66 @@ func (m model) renderHeader() string {
 	}
 
 	bar := left + strings.Repeat(" ", gap) + right
-	return headerBarStyle.Width(m.width).Render(bar)
+	header := headerBarStyle.Width(m.width).Render(bar)
+
+	// Tab bar as second header line (quiz question tabs, challenge tabs)
+	if tabBar := m.headerTabBar(); tabBar != "" {
+		header += "\n" + headerBarStyle.Width(m.width).Render(tabBar)
+	}
+	return header
+}
+
+// headerTabBar returns the tab bar for the current phase (rendered in header area).
+func (m model) headerTabBar() string {
+	bg := lipgloss.Color("235")
+	active := lipgloss.NewStyle().Foreground(colorAccent).Background(bg).Bold(true).Inline(true)
+	inactive := lipgloss.NewStyle().Foreground(colorDim).Background(bg).Inline(true)
+
+	if m.phase == phaseQuiz && m.quizStep == stepQuestion {
+		tabs := []struct {
+			label string
+			tab   questionTab
+		}{
+			{"chat", qTabChat},
+			{"quiz", qTabQuiz},
+			{"knowledge", qTabKnowledge},
+		}
+		var parts []string
+		for _, t := range tabs {
+			if m.questionTab == t.tab {
+				parts = append(parts, active.Render("["+t.label+"]"))
+			} else {
+				parts = append(parts, inactive.Render(" "+t.label+" "))
+			}
+		}
+		return " " + strings.Join(parts, " ")
+	}
+
+	if m.phase == phaseChallenge && (m.challengeStep == challengeWorking || m.challengeStep == challengeResult) {
+		type tab struct {
+			label string
+			tab   challengeTabType
+		}
+		tabs := []tab{
+			{"chat", cTabChat},
+			{"problem", cTabProblem},
+			{"code", cTabCode},
+		}
+		if m.challengeStep == challengeResult {
+			tabs = append(tabs, tab{"explanation", cTabExplanation})
+		}
+		var parts []string
+		for _, t := range tabs {
+			if m.challengeTab == t.tab {
+				parts = append(parts, active.Render("["+t.label+"]"))
+			} else {
+				parts = append(parts, inactive.Render(" "+t.label+" "))
+			}
+		}
+		return " " + strings.Join(parts, " ")
+	}
+
+	return ""
 }
 
 func (m model) headerDiffStyle(d ollama.Difficulty) string {
@@ -300,28 +391,40 @@ func (m model) renderContent() string {
 func (m model) renderDashboard() string {
 	var b strings.Builder
 
-	// Level + XP bar (Removed)
+	// Level + XP bar (aligned with header)
 	if m.state != nil {
+		lvl := m.state.Level()
 		cur, needed := m.state.LevelProgress()
 		barW := 30
-		filled := cur * barW / needed
+		filled := 0
+		if needed > 0 {
+			filled = cur * barW / needed
+		}
 		if filled > barW {
 			filled = barW
 		}
-
-		// Streak
+		b.WriteString("  ")
+		b.WriteString(headerStreakStyle.Render(fmt.Sprintf("Lv.%d", lvl)))
+		b.WriteString(" ")
+		b.WriteString(headerBarFilledStyle.Render(strings.Repeat("█", filled)) + headerBarEmptyStyle.Render(strings.Repeat("░", barW-filled)) + headerDimStyle.Render(fmt.Sprintf(" %d/%d", cur, needed)))
+		b.WriteString("\n")
 		if m.state.DayStreak > 0 {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("  %d day streak", m.state.DayStreak)))
+			mult := 1.0 + float64(m.state.DayStreak)*0.1
+			if mult > 2.0 {
+				mult = 2.0
+			}
+			streakLine := fmt.Sprintf("  %d-day streak", m.state.DayStreak)
+			if mult > 1.0 {
+				streakLine += fmt.Sprintf("  ·  ×%.1f XP", mult)
+			}
+			b.WriteString(dimStyle.Render(streakLine))
 		}
 		b.WriteString("\n\n")
 	}
 
 	// Daily goal progress
 	if m.dailyGoal > 0 && m.state != nil {
-		todayTotal := 0
-		for _, s := range m.state.TodaySessions() {
-			todayTotal += s.Total
-		}
+		todayTotal := m.state.TodayQuestionCount()
 		goalStr := fmt.Sprintf("  daily goal: %d/%d", todayTotal, m.dailyGoal)
 		if todayTotal >= m.dailyGoal {
 			b.WriteString(correctStyle.Render(goalStr + " done!"))
@@ -641,34 +744,12 @@ func (m model) buildLessonContent() string {
 	return b.String()
 }
 
-func (m model) renderQuestionTabs() string {
-	active := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	tabs := []struct {
-		label string
-		tab   questionTab
-	}{
-		{"chat", qTabChat},
-		{"quiz", qTabQuiz},
-		{"knowledge", qTabKnowledge},
-	}
-	var parts []string
-	for _, t := range tabs {
-		if m.questionTab == t.tab {
-			parts = append(parts, active.Render("["+t.label+"]"))
-		} else {
-			parts = append(parts, dimStyle.Render(" "+t.label+" "))
-		}
-	}
-	return "  " + strings.Join(parts, " ")
-}
-
 func (m model) renderQuestion() string {
 	var b strings.Builder
 	w := m.wrapW()
 
-	// Tab bar
-	b.WriteString(m.renderQuestionTabs())
-	b.WriteString("\n\n")
+	// Tab bar is now in the header
+	b.WriteString("\n")
 
 	switch m.questionTab {
 	case qTabChat:
@@ -910,16 +991,58 @@ func renderXPBreakdown(bd state.XPBreakdown, confLabel string) string {
 
 // --- Challenge ---
 
+func (m model) renderChallengeInput() string {
+	var b strings.Builder
+	b.WriteString(questionStyle.Render("what do you want to practice?"))
+	b.WriteString("\n\n")
+	b.WriteString("  " + m.learnTA.View())
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render("  tip: describe a topic, or press enter empty for a random challenge"))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("  e.g. binary search in Go, React hooks, SQL joins"))
+	return b.String()
+}
+
+func (m model) renderChallengeChat() string {
+	var b strings.Builder
+	w := m.wrapW()
+
+	b.WriteString(questionStyle.Render(fmt.Sprintf("challenge: %s", m.challengeTopic)))
+	b.WriteString("\n\n")
+
+	for _, msg := range m.challengeChatHistory {
+		if msg.role == "user" {
+			b.WriteString(optionStyle.Width(w).Render("👤 " + msg.content))
+		} else {
+			b.WriteString("  🤖\n")
+			b.WriteString(renderExplanation(msg.content, w))
+		}
+		b.WriteString("\n")
+	}
+
+	if m.challengeChatLoading {
+		b.WriteString("  " + m.spinner.View() + " thinking...\n")
+	} else {
+		b.WriteString("  " + m.learnTA.View())
+	}
+
+	return b.String()
+}
+
 func (m model) renderChallenge() string {
 	switch m.challengeStep {
+	case challengeInput:
+		return m.renderChallengeInput()
+	case challengeChat:
+		return m.renderChallengeChat()
 	case challengeLoading:
 		return fmt.Sprintf("\n\n  %s generating challenge...", m.spinner.View())
 	case challengeGrading:
 		return fmt.Sprintf("\n\n  %s evaluating your code...", m.spinner.View())
 	case challengeWorking, challengeResult:
 		var b strings.Builder
-		b.WriteString(m.renderChallengeTabs())
-		b.WriteString("\n\n")
+		// Tab bar is now in the header
+		b.WriteString("\n")
 
 		switch m.challengeTab {
 		case cTabChat:
@@ -951,31 +1074,6 @@ func (m model) renderChallenge() string {
 		return b.String()
 	}
 	return ""
-}
-
-func (m model) renderChallengeTabs() string {
-	active := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	type tab struct {
-		label string
-		tab   challengeTabType
-	}
-	tabs := []tab{
-		{"chat", cTabChat},
-		{"problem", cTabProblem},
-		{"code", cTabCode},
-	}
-	if m.challengeStep == challengeResult {
-		tabs = append(tabs, tab{"explanation", cTabExplanation})
-	}
-	var parts []string
-	for _, t := range tabs {
-		if m.challengeTab == t.tab {
-			parts = append(parts, active.Render("["+t.label+"]"))
-		} else {
-			parts = append(parts, dimStyle.Render(" "+t.label+" "))
-		}
-	}
-	return "  " + strings.Join(parts, " ")
 }
 
 func (m model) buildChallengeProblemContent() string {
@@ -1060,7 +1158,6 @@ func (m model) buildChallengeResultContent() string {
 	} else if m.explainLoading {
 		b.WriteString("\n\n  " + m.spinner.View() + " explaining...")
 	}
-
 	b.WriteString("\n")
 	return b.String()
 }
@@ -1307,7 +1404,14 @@ func (m model) buildStatsContent() string {
 	b.WriteString("\n")
 
 	if m.state.DayStreak > 0 {
-		b.WriteString(streakStyle.Render(fmt.Sprintf("  %d day streak", m.state.DayStreak)))
+		b.WriteString(streakStyle.Render(fmt.Sprintf("  %d-day streak", m.state.DayStreak)))
+		mult := 1.0 + float64(m.state.DayStreak)*0.1
+		if mult > 2.0 {
+			mult = 2.0
+		}
+		if mult > 1.0 {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  ·  ×%.1f XP mult", mult)))
+		}
 		b.WriteString("\n")
 	}
 
@@ -1647,6 +1751,14 @@ func (m model) renderStatus() string {
 		keys = m.learnStatusKeys()
 	case phaseChallenge:
 		switch m.challengeStep {
+		case challengeInput:
+			keys = []struct{ key, action string }{
+				{"enter", "submit / random"}, {"esc", "back"},
+			}
+		case challengeChat:
+			keys = []struct{ key, action string }{
+				{"enter", "reply"}, {"ctrl+g", "generate"}, {"esc", "back"},
+			}
 		case challengeLoading, challengeGrading:
 			keys = []struct{ key, action string }{
 				{"esc", "back"},

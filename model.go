@@ -14,7 +14,9 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"go.dalton.dog/bubbleup"
 
 	"github.com/LFroesch/unrot/internal/knowledge"
 	"github.com/LFroesch/unrot/internal/ollama"
@@ -257,8 +259,10 @@ type model struct {
 	savedChallengeCode string // challenge code textarea content saved when switching away
 
 	// XP / achievements
-	toast          string            // achievement notification (cleared on next keypress)
-	xpGained       int               // XP gained this action (for display)
+	toast          string               // inline hint toast (audit prompts, etc.)
+	alerts         *bubbleup.AlertModel // bubbleup notification system
+	pendingAlerts  []tea.Cmd            // queued alert cmds to batch on next return
+	xpGained       int                  // XP gained this action (for display)
 	xpBreakdown    state.XPBreakdown // breakdown of last XP award (for display)
 	sessionMinConf int               // minimum confidence rated this session (for perfect session achievement)
 	learnChatCount int               // questions asked in current lesson chat (for deep dive achievement)
@@ -267,14 +271,17 @@ type model struct {
 	comboMax       int               // best combo this session
 
 	// Challenge mode
-	challengeStep    challengeStep
-	challengeTab     challengeTabType // active tab during working/result
-	currentChallenge *ollama.Challenge
-	challengeGrade   *ollama.ChallengeGrade
-	challengeCount   int               // challenges completed this session
-	challengeDiff    ollama.Difficulty // adaptive difficulty for challenges
-	challengeCode    string            // submitted code (for viewing on result)
-	challengeExplain string            // expanded explanation from `e` key on result
+	challengeStep        challengeStep
+	challengeTab         challengeTabType // active tab during working/result
+	currentChallenge     *ollama.Challenge
+	challengeGrade       *ollama.ChallengeGrade
+	challengeCount       int               // challenges completed this session
+	challengeDiff        ollama.Difficulty  // adaptive difficulty for challenges
+	challengeCode        string            // submitted code (for viewing on result)
+	challengeExplain     string            // expanded explanation from `e` key on result
+	challengeTopic       string            // user's topic input for challenge chat
+	challengeChatHistory []chatEntry       // conversational flow before generating challenge
+	challengeChatLoading bool              // waiting for ollama response in challenge chat
 
 	// Daily goal
 	dailyGoal int
@@ -297,6 +304,8 @@ type model struct {
 	sessionWrongs  []wrongItem // wrong answers for recap
 	sessionStart   time.Time   // when review started
 	sessionDomains map[string]bool
+	// Index of the Session row for this run in state.Sessions (-1 = none yet).
+	sessionRecordIdx int
 
 	// UI components
 	spinner  spinner.Model
@@ -304,6 +313,32 @@ type model struct {
 	width    int
 	height   int
 	err      error
+}
+
+// Bubbleup alert type keys
+const (
+	alertLevelUp     = "LevelUp"
+	alertAchievement = "Achievement"
+	alertXP          = "XP"
+	alertHint        = "Hint"
+)
+
+func newAlertModel() *bubbleup.AlertModel {
+	am := bubbleup.NewAlertModel(40, false, 3*time.Second)
+	am = &[]bubbleup.AlertModel{(*am).WithPosition(bubbleup.TopRightPosition).WithMinWidth(20)}[0]
+	am.RegisterNewAlertType(bubbleup.AlertDefinition{
+		Key: alertLevelUp, ForeColor: string(colorYellow), Prefix: "✦ ",
+	})
+	am.RegisterNewAlertType(bubbleup.AlertDefinition{
+		Key: alertAchievement, ForeColor: string(colorYellow), Prefix: "★ ",
+	})
+	am.RegisterNewAlertType(bubbleup.AlertDefinition{
+		Key: alertXP, ForeColor: string(colorPrimary), Prefix: "+ ",
+	})
+	am.RegisterNewAlertType(bubbleup.AlertDefinition{
+		Key: alertHint, ForeColor: string(colorAccent), Prefix: "",
+	})
+	return am
 }
 
 func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) model {
@@ -356,15 +391,34 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 		learnStep:       learnInput,
 		activeOverlay:   overlayNone,
 		spinner:         sp,
+		alerts:          newAlertModel(),
 		answerTA:        ansTA,
 		learnTA:         learnTA,
 		pickSearch:      searchTI,
 		viewport:        vp,
 		overlayViewport: ovp,
-		sessionDomains:  make(map[string]bool),
-		activeTypes:     allOn,
+		sessionDomains:   make(map[string]bool),
+		sessionRecordIdx: -1,
+		activeTypes:      allOn,
 		sessionMinConf:  6, // higher than max so first rating always sets it
 	}
+}
+
+// queueAlert queues a bubbleup notification to fire on the next Update return.
+func (m *model) queueAlert(alertType, message string) {
+	if m.alerts != nil {
+		m.pendingAlerts = append(m.pendingAlerts, m.alerts.NewAlertCmd(alertType, message))
+	}
+}
+
+// flushAlerts returns a batched cmd of all pending alerts and clears the queue.
+func (m *model) flushAlerts(cmd tea.Cmd) tea.Cmd {
+	if len(m.pendingAlerts) == 0 {
+		return cmd
+	}
+	cmds := append(m.pendingAlerts, cmd)
+	m.pendingAlerts = nil
+	return tea.Batch(cmds...)
 }
 
 func (m model) currentDomain() string {
