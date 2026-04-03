@@ -22,6 +22,8 @@ func (m model) viewportContent() string {
 			return m.buildLessonContent()
 		case stepResult:
 			return m.buildResultContent()
+		case stepSessionContinue:
+			return m.buildSessionContinueContent()
 		}
 	case phaseLearn:
 		if m.learnStep == learnReview {
@@ -601,8 +603,28 @@ func (m model) renderQuiz() string {
 		return m.renderGrading()
 	case stepResult:
 		return m.viewport.View()
+	case stepSessionContinue:
+		return m.renderSessionContinue()
 	}
 	return ""
+}
+
+func (m model) buildSessionContinueContent() string {
+	var b strings.Builder
+	b.WriteString("\n\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(colorWarn).Bold(true).Render("  SESSION GOAL REACHED"))
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf("  %d / %d questions", m.sessionTotal, m.maxQuestions)))
+	b.WriteString("\n\n")
+	b.WriteString(labelStyle.Render(fmt.Sprintf("  Continue for %d more?", sessionExtendExtra)))
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render("  y / enter  continue    n / esc  wrap up"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m model) renderSessionContinue() string {
+	return m.buildSessionContinueContent()
 }
 
 func (m model) buildLessonContent() string {
@@ -1452,7 +1474,7 @@ func (m model) renderSettings() string {
 		b.WriteString(fmt.Sprintf("    %s\n", qLabel))
 	}
 
-	// Challenge difficulty setting
+	// Default Challenge difficulty setting
 	b.WriteString("\n")
 	b.WriteString(divider("challenge", m.wrapW()))
 	b.WriteString("\n\n")
@@ -1804,6 +1826,10 @@ func (m model) quizStatusKeys() []struct{ key, action string } {
 	case stepGrading:
 		return []struct{ key, action string }{
 			{"", "thinking..."},
+		}
+	case stepSessionContinue:
+		return []struct{ key, action string }{
+			{"y / enter", "continue"}, {"n / esc", "wrap up"},
 		}
 	case stepResult:
 		if !m.answerRevealed {

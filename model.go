@@ -54,6 +54,7 @@ const (
 	stepQuestion                 // showing question, waiting for answer
 	stepGrading                  // spinner while evaluating
 	stepResult                   // showing verdict + confidence picker
+	stepSessionContinue          // session goal reached — offer more questions (arcade “continue”)
 )
 
 // --- Learn sub-states ---
@@ -185,6 +186,7 @@ type model struct {
 	retryQueue      []string
 	retryPhase      bool // true when working through retry queue
 	retryCount      map[string]int
+	reviewQueueCapped bool // true when review list was truncated to maxQuestions (smart review from dashboard)
 
 	// Topic list (browse/pick)
 	pickMode      bool

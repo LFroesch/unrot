@@ -975,6 +975,8 @@ func (m model) handleQuiz(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch m.quizStep {
 	case stepLesson:
 		return m.handleLesson(msg)
+	case stepSessionContinue:
+		return m.handleSessionContinue(msg)
 	case stepLoading, stepGrading:
 		key := msg.String()
 		if key == "esc" {
@@ -991,6 +993,19 @@ func (m model) handleQuiz(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m.handleResult(msg)
 	}
 	return m, nil
+}
+
+func (m model) handleSessionContinue(msg tea.KeyMsg) (model, tea.Cmd) {
+	key := msg.String()
+	m.toast = ""
+	switch key {
+	case "y", "Y", "enter":
+		return m, (&m).extendSessionContinue()
+	case "n", "N", "esc":
+		return m, (&m).finishSession()
+	default:
+		return m, nil
+	}
 }
 
 func (m model) handleLesson(msg tea.KeyMsg) (model, tea.Cmd) {

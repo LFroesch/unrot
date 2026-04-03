@@ -14,6 +14,9 @@ import (
 
 const maxRetries = 2
 
+// sessionExtendExtra is how many more questions a "continue session" grants (arcade-style).
+const sessionExtendExtra = 5
+
 // resetSession clears all session tracking state for a fresh start.
 // Does NOT set pickMode or reviewFiles — caller handles those.
 func (m *model) resetSession() {
@@ -35,6 +38,66 @@ func (m *model) resetSession() {
 	m.comboMax = 0
 	m.xpGained = 0
 	m.levelUpFrom = 0
+	m.reviewQueueCapped = false
+}
+
+// applyReviewQueuePipeline returns priority-sorted files with prereq insertion and domain interleaving.
+func (m *model) applyReviewQueuePipeline(files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	reviewFiles := m.state.FilesByPriority(files)
+
+	// Bias toward foundational (prereq) files when overall confidence is low.
+	if m.depGraph != nil && m.state.AvgConfidence(reviewFiles) < 3.0 {
+		sort.SliceStable(reviewFiles, func(i, j int) bool {
+			iConf := m.state.GetConfidence(reviewFiles[i])
+			jConf := m.state.GetConfidence(reviewFiles[j])
+			iDeps := m.depGraph.DependentCount(reviewFiles[i])
+			jDeps := m.depGraph.DependentCount(reviewFiles[j])
+			iFoundational := iDeps > 0 && iConf <= 2
+			jFoundational := jDeps > 0 && jConf <= 2
+			if iFoundational != jFoundational {
+				return iFoundational
+			}
+			return false
+		})
+	}
+
+	if m.depGraph != nil {
+		reviewFiles = m.insertPrereqs(reviewFiles)
+	}
+
+	if m.domainFilter == "" && len(reviewFiles) > 1 {
+		reviewFiles = interleaveByDomain(reviewFiles, 2, m.depGraph)
+	}
+
+	return reviewFiles
+}
+
+// rebuildReviewFileQueue rebuilds the capped review list after maxQuestions grows (continue session).
+func (m *model) rebuildReviewFileQueue() []string {
+	files := m.allFiles
+	if m.domainFilter != "" {
+		files = knowledge.FilterByDomain(files, m.domainFilter)
+	}
+	if len(files) == 0 {
+		return m.reviewFiles
+	}
+	reviewFiles := m.applyReviewQueuePipeline(files)
+	if m.maxQuestions > 0 && len(reviewFiles) > m.maxQuestions {
+		reviewFiles = reviewFiles[:m.maxQuestions]
+	}
+	return reviewFiles
+}
+
+// extendSessionContinue adds more questions and resumes the quiz (see stepSessionContinue).
+func (m *model) extendSessionContinue() tea.Cmd {
+	m.maxQuestions += sessionExtendExtra
+	if m.reviewQueueCapped {
+		m.reviewFiles = m.rebuildReviewFileQueue()
+	}
+	return m.nextQuestion()
 }
 
 // startReview begins a priority-ordered review session.
@@ -49,41 +112,16 @@ func (m *model) startReview() tea.Cmd {
 		}
 	}
 
-	m.reviewFiles = m.state.FilesByPriority(files)
-
-	// Bias toward foundational (prereq) files when overall confidence is low.
-	// When avg confidence < 3, files that others depend on get promoted to the front.
-	if m.depGraph != nil && m.state.AvgConfidence(m.reviewFiles) < 3.0 {
-		sort.SliceStable(m.reviewFiles, func(i, j int) bool {
-			iConf := m.state.GetConfidence(m.reviewFiles[i])
-			jConf := m.state.GetConfidence(m.reviewFiles[j])
-			iDeps := m.depGraph.DependentCount(m.reviewFiles[i])
-			jDeps := m.depGraph.DependentCount(m.reviewFiles[j])
-			// Foundational files (depended upon by others) with low confidence go first
-			iFoundational := iDeps > 0 && iConf <= 2
-			jFoundational := jDeps > 0 && jConf <= 2
-			if iFoundational != jFoundational {
-				return iFoundational
-			}
-			return false
-		})
-	}
-
-	// Insert stale prerequisites before their dependents
-	if m.depGraph != nil {
-		m.reviewFiles = m.insertPrereqs(m.reviewFiles)
-	}
-
-	// Interleave domains (skip if single-domain filter — nothing to mix)
-	if m.domainFilter == "" && len(m.reviewFiles) > 1 {
-		m.reviewFiles = interleaveByDomain(m.reviewFiles, 2, m.depGraph)
-	}
-
+	full := m.applyReviewQueuePipeline(files)
+	priorLen := len(full)
+	m.reviewFiles = full
 	if m.maxQuestions > 0 && len(m.reviewFiles) > m.maxQuestions {
 		m.reviewFiles = m.reviewFiles[:m.maxQuestions]
 	}
+	capped := m.maxQuestions > 0 && priorLen > len(m.reviewFiles)
 
 	m.resetSession()
+	m.reviewQueueCapped = capped
 	m.pickMode = false
 	m.phase = phaseQuiz
 
@@ -131,7 +169,9 @@ func (m *model) enqueueRetry(file string) {
 
 func (m *model) nextQuestion() tea.Cmd {
 	if !m.pickMode && m.maxQuestions > 0 && m.sessionTotal >= m.maxQuestions {
-		return m.finishSession()
+		m.quizStep = stepSessionContinue
+		m.syncViewport()
+		return nil
 	}
 
 	if m.pickMode {
