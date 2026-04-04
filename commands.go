@@ -95,7 +95,6 @@ type challengeChatMsg struct{ text string }
 type clipboardMsg struct{ ok bool }
 
 type projectSubsystemsMsg struct{ subsystems []string }
-type projectChatMsg struct{ text string }
 type projectContentMsg struct{ content string }
 type projectFilesMsg struct{ files []string }
 type projectFileProcessedMsg struct {
@@ -653,49 +652,22 @@ func enrichFileCmd(ctx context.Context, client *ollama.Client, brainPath, indexC
 
 // --- Project Scan Commands ---
 
-func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, archContext string) tea.Cmd {
+func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, archContext, fileTree string) tea.Cmd {
 	return func() tea.Msg {
-		subs, err := client.ProposeSubsystems(ctx, archContext)
+		projectLog("proposing subsystems...")
+		subs, err := client.ProposeSubsystems(ctx, archContext, fileTree)
 		if err != nil {
 			return errMsg{err}
 		}
+		projectLog("proposed %d subsystems: %v", len(subs), subs)
 		return projectSubsystemsMsg{subsystems: subs}
-	}
-}
-
-func projectClarifyCmd(ctx context.Context, client *ollama.Client, repoPath, projectName, subsystem, archContext string, history []chatEntry) tea.Cmd {
-	return func() tea.Msg {
-		system := fmt.Sprintf(`You are helping a developer document the "%s" subsystem of their "%s" project.
-Ask 1-2 clarifying questions about what aspects to focus on:
-- Which files or functions matter most for this subsystem?
-- What non-obvious decisions should the doc capture?
-- Any gotchas they want to make sure are recorded?
-
-You can see the project's file tree — reference specific files by name when asking about focus areas.
-
-Rules:
-- Keep it conversational — 2-3 sentences max
-- If you already have enough context, say: "Got it. Press ctrl+g to generate the knowledge doc."
-- Don't repeat questions they already answered`, subsystem, projectName)
-
-		fileTree := listRepoTree(repoPath)
-		msgs := make([]ollama.Message, 0, len(history)+2)
-		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to document the %s subsystem.\n\nArchitecture context:\n%s\n\nFile tree:\n%s", subsystem, archContext, fileTree)})
-		for _, h := range history {
-			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
-		}
-
-		resp, err := client.ChatWithHistory(ctx, system, msgs)
-		if err != nil {
-			return errMsg{err}
-		}
-		return projectChatMsg{text: resp}
 	}
 }
 
 // suggestFilesCmd asks ollama which source files to read for a subsystem.
 func suggestFilesCmd(ctx context.Context, client *ollama.Client, repoPath, archContext, subsystem string, chatHistory []chatEntry) tea.Cmd {
 	return func() tea.Msg {
+		projectLog("[%s] asking ollama to pick files...", subsystem)
 		tree := listRepoTree(repoPath)
 		msgs := make([]ollama.Message, len(chatHistory))
 		for i, h := range chatHistory {
@@ -748,8 +720,14 @@ func suggestFilesCmd(ctx context.Context, client *ollama.Client, repoPath, archC
 			}
 		}
 		if len(valid) == 0 {
-			return errMsg{fmt.Errorf("ollama couldn't identify relevant source files — try mentioning specific filenames in the chat")}
+			projectLog("[%s] no valid files found, skipping", subsystem)
+			return errMsg{fmt.Errorf("no source files found for %s subsystem", subsystem)}
 		}
+		// Cap at 3 files per subsystem to keep ollama calls manageable on small models
+		if len(valid) > 3 {
+			valid = valid[:3]
+		}
+		projectLog("[%s] selected %d files: %v", subsystem, len(valid), valid)
 		return projectFilesMsg{files: valid}
 	}
 }
@@ -758,8 +736,10 @@ func suggestFilesCmd(ctx context.Context, client *ollama.Client, repoPath, archC
 func processFileCmd(ctx context.Context, client *ollama.Client, repoPath string, files []string, idx int, runningNotes, subsystem string) tea.Cmd {
 	return func() tea.Msg {
 		f := files[idx]
+		projectLog("[%s] reading %s (%d/%d)...", subsystem, f, idx+1, len(files))
 		data, err := os.ReadFile(filepath.Join(repoPath, f))
 		if err != nil {
+			projectLog("[%s] ERROR reading %s: %v", subsystem, f, err)
 			// Skip unreadable files, pass notes through
 			return projectFileProcessedMsg{notes: runningNotes, fileIdx: idx}
 		}
@@ -805,26 +785,17 @@ func processFileCmd(ctx context.Context, client *ollama.Client, repoPath string,
 // generateProjectFromNotesCmd synthesizes a knowledge doc from accumulated file notes.
 func generateProjectFromNotesCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext, notes string, chatHistory []chatEntry) tea.Cmd {
 	return func() tea.Msg {
+		projectLog("[%s] synthesizing knowledge doc from notes (%d chars)...", subsystem, len(notes))
 		msgs := make([]ollama.Message, len(chatHistory))
 		for i, h := range chatHistory {
 			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
 		}
 		content, err := client.GenerateProjectFromNotes(ctx, projectName, subsystem, archContext, notes, msgs)
 		if err != nil {
+			projectLog("[%s] ERROR synthesizing: %v", subsystem, err)
 			return errMsg{err}
 		}
-		return projectContentMsg{content: content}
-	}
-}
-
-// batchGenerateProjectCmd generates a knowledge doc from arch context + file tree (no source scanning).
-func batchGenerateProjectCmd(ctx context.Context, client *ollama.Client, repoPath, projectName, subsystem, archContext string) tea.Cmd {
-	return func() tea.Msg {
-		tree := listRepoTree(repoPath)
-		content, err := client.GenerateProjectFromContext(ctx, projectName, subsystem, archContext, tree)
-		if err != nil {
-			return errMsg{err}
-		}
+		projectLog("[%s] doc generated (%d chars)", subsystem, len(content))
 		return projectContentMsg{content: content}
 	}
 }

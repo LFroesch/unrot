@@ -1222,22 +1222,28 @@ If no prerequisites, just output the difficulty line.`
 }
 
 // ProposeSubsystems asks ollama to suggest subsystems to document for a project.
-// archContext is the project's CLAUDE.md/README content.
-func (c *Client) ProposeSubsystems(ctx context.Context, archContext string) ([]string, error) {
+// archContext is the project's CLAUDE.md/README content, fileTree is the repo's file listing.
+func (c *Client) ProposeSubsystems(ctx context.Context, archContext, fileTree string) ([]string, error) {
 	system := `You are analyzing a software project to propose subsystems worth documenting.
-Each subsystem is a logical grouping of functionality (e.g. "quiz-flow", "xp-system", "ollama-integration").
+Each subsystem is a logical grouping of functionality that maps to real files in the codebase.
 
 Rules:
-- Propose 5-8 subsystems, ordered by importance
+- Propose 3-5 subsystems, ordered by importance (fewer is better — only the most interesting)
 - Each line: slug — one-sentence description
 - Slug format: lowercase-hyphenated (e.g. "quiz-flow", "state-management")
-- Focus on things a developer would forget after a few weeks away
-- Group by logical concern, not by file
+- Focus on things a developer would need to explain in an interview
+- Group by logical concern, not by file — but each subsystem should map to specific files
+- Use the file tree to identify REAL subsystems, not guesses
+- Prioritize: core architecture, interesting patterns, non-obvious design decisions
 
 Output format (one per line, nothing else):
 slug — description`
 
-	resp, err := c.Chat(ctx, system, "Project architecture:\n\n"+archContext)
+	userMsg := "Project architecture:\n\n" + archContext
+	if fileTree != "" {
+		userMsg += "\n\nFile tree:\n" + fileTree
+	}
+	resp, err := c.Chat(ctx, system, userMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -1292,9 +1298,9 @@ slug — description`
 		}
 		subsystems = append(subsystems, line)
 	}
-	// Cap at 8 even if ollama ignores the prompt instruction
-	if len(subsystems) > 8 {
-		subsystems = subsystems[:8]
+	// Cap at 5 — more than that is too slow on small models
+	if len(subsystems) > 5 {
+		subsystems = subsystems[:5]
 	}
 	return subsystems, nil
 }
@@ -1433,10 +1439,14 @@ func parseFilePaths(resp string) []string {
 // building on accumulated notes from previously processed files.
 func (c *Client) ExtractFileNotes(ctx context.Context, fileName, fileContent, runningNotes, subsystem string) (string, error) {
 	system := fmt.Sprintf(`You are analyzing source files for the "%s" subsystem, one file at a time.
-Your job: extract the important parts — key data structures, functions, control flow, design decisions, gotchas.
+Your job: extract what matters for understanding this code AND for interview prep.
 
 Rules:
 - Be DENSE and SPECIFIC — function names, struct fields, state transitions, not vague summaries
+- Identify design patterns used (state machine, fan-out, builder, pub-sub, observer, etc)
+- Note algorithmic choices and their time/space complexity
+- Flag trade-offs: why this approach over alternatives?
+- Tag interview-relevant concepts (concurrency, caching, error handling, serialization, etc)
 - Note connections to things found in previously analyzed files
 - Include short code snippets for non-obvious logic (5-10 lines max each)
 - Call out implicit assumptions, ordering dependencies, edge cases
@@ -1454,43 +1464,46 @@ Rules:
 }
 
 // GenerateProjectFromNotes creates a knowledge doc from accumulated file analysis notes.
+// Focused on interview prep: ties code to patterns, trade-offs, and questions an interviewer would ask.
 func (c *Client) GenerateProjectFromNotes(ctx context.Context, projectName, subsystem, archContext, accumulatedNotes string, chatHistory []Message) (string, error) {
 	system := fmt.Sprintf(`You are documenting the "%s" subsystem of the "%s" project for the developer who built it.
-You have accumulated analysis notes from reading the actual source files, plus architecture context and any conversation with the developer.
+You have accumulated analysis notes from reading the actual source files, plus architecture context.
 
-The goal is to fight "I forgot how my own code works" decay. Write as if explaining to yourself in 3 months.
+The goal: prepare the developer to explain this code in a technical interview. They built it — help them articulate WHY and HOW.
 
 Rules:
 - Start with: # %s — %s
-- Focus on HOW it works and WHY it was built this way
-- Include key data structures, state transitions, and control flow
-- Call out non-obvious decisions and gotchas
 - Reference specific function/type names from the source analysis
+- Every fact should be something an interviewer could ask about
 - Use these sections:
 
 ## Overview
 1-3 sentences: what this subsystem does and why it exists
 
-## How It Works
-- Step-by-step mechanism, data flow, key functions
-- Include code references (function names, file:line patterns)
-- Show key data structures inline
+## Architecture & Patterns
+- Name each design pattern used (state machine, fan-out, observer, etc)
+- Show WHERE it's used (specific functions/types)
+- Explain the trade-off: "X pattern because Y. Alternative was Z but that would mean..."
 
-## Design Decisions
-- Why this approach? What alternatives were considered?
-- Trade-offs accepted
+## Key Implementation Details
+- Data structures, state transitions, control flow
+- Specific function/type names with file references
+- Show key code constructs inline (brief)
+
+## Interview Angles
+- 3-5 questions an interviewer might ask about this subsystem
+- Format each as: "Why did you choose X over Y?" → brief answer
+- Include: scaling questions, failure mode questions, design justification questions
 
 ## Gotchas
-- Things that would trip you up coming back to this code
 - Edge cases, implicit assumptions, ordering dependencies
+- Things that would trip you up coming back to this code
 
 ## Connections
 - requires: domain/slug (prerequisites from other knowledge files)
-- How this subsystem interacts with others
 
-- Keep it 40-80 lines — dense, specific, quizzable
-- NO markdown code fences wrapping the whole document
-- Every fact should be something worth quizzing on`, subsystem, projectName, projectName, subsystem)
+- Keep it 60-100 lines — dense, specific, quizzable
+- NO markdown code fences wrapping the whole document`, subsystem, projectName, projectName, subsystem)
 
 	msgs := make([]Message, 0, len(chatHistory)+3)
 	if archContext != "" {
@@ -1503,48 +1516,3 @@ Rules:
 	return c.ChatWithHistory(ctx, system, msgs)
 }
 
-// GenerateProjectFromContext creates a knowledge doc from architecture context + file tree only.
-// Used by batch mode to avoid expensive per-file scanning.
-func (c *Client) GenerateProjectFromContext(ctx context.Context, projectName, subsystem, archContext, fileTree string) (string, error) {
-	system := fmt.Sprintf(`You are documenting the "%s" subsystem of the "%s" project for the developer who built it.
-You have the project's architecture docs (CLAUDE.md/README) and its file tree. Use these to write a focused knowledge document.
-
-The goal is to fight "I forgot how my own code works" decay. Write as if explaining to yourself in 3 months.
-
-Rules:
-- Start with: # %s — %s
-- Focus on HOW it works and WHY it was built this way
-- Include key data structures, state transitions, and control flow
-- Call out non-obvious decisions and gotchas
-- Reference specific function/type/file names from the architecture docs
-- Use these sections:
-
-## Overview
-1-3 sentences: what this subsystem does and why it exists
-
-## How It Works
-- Step-by-step mechanism, data flow, key functions
-- Include code references (function names, file paths)
-- Show key data structures inline
-
-## Design Decisions
-- Why this approach? What alternatives were considered?
-- Trade-offs accepted
-
-## Gotchas
-- Things that would trip you up coming back to this code
-- Edge cases, implicit assumptions, ordering dependencies
-
-## Connections
-- requires: domain/slug (prerequisites from other knowledge files)
-- How this subsystem interacts with others
-
-- Keep it 40-80 lines — dense, specific, quizzable
-- NO markdown code fences wrapping the whole document
-- Every fact should be something worth quizzing on`, subsystem, projectName, projectName, subsystem)
-
-	msgs := []Message{
-		{Role: "user", Content: fmt.Sprintf("Architecture context:\n\n%s\n\nFile tree:\n%s\n\nGenerate the knowledge document for the %s subsystem.", archContext, fileTree, subsystem)},
-	}
-	return c.ChatWithHistory(ctx, system, msgs)
-}
