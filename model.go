@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -42,6 +43,8 @@ const (
 	phaseSettings               // settings page (quiz types, etc.)
 	phaseChallenge              // coding challenge mode (not tied to knowledge files)
 	phaseViewer                 // read-only knowledge file viewer
+	phaseProject                // project scan: analyze your own repos into knowledge files
+	phaseRecent                 // recent questions zone (retry last 10)
 	phaseDone                   // session recap
 	phaseError                  // error display
 )
@@ -51,12 +54,12 @@ const (
 type quizStep int
 
 const (
-	stepLesson   quizStep = iota // showing knowledge file before quiz
-	stepLoading                  // spinner while generating question
-	stepQuestion                 // showing question, waiting for answer
-	stepGrading                  // spinner while evaluating
-	stepResult                   // showing verdict + confidence picker
-	stepSessionContinue          // session goal reached — offer more questions (arcade “continue”)
+	stepLesson          quizStep = iota // showing knowledge file before quiz
+	stepLoading                         // spinner while generating question
+	stepQuestion                        // showing question, waiting for answer
+	stepGrading                         // spinner while evaluating
+	stepResult                          // showing verdict + confidence picker
+	stepSessionContinue                 // session goal reached — offer more questions (arcade “continue”)
 )
 
 // --- Learn sub-states ---
@@ -83,6 +86,19 @@ const (
 	challengeResult                       // showing feedback + score
 )
 
+// --- Project scan sub-states ---
+
+type projectStep int
+
+const (
+	projectRepoInput  projectStep = iota // enter repo path
+	projectProposing                     // ollama proposing subsystems (spinner)
+	projectPicking                       // user picks subsystem from proposal list
+	projectChat                          // conversational clarification before generating
+	projectGenerating                    // generating knowledge doc (spinner)
+	projectReview                        // review generated content (viewport)
+)
+
 // --- Question tabs (during stepQuestion) ---
 
 type questionTab int
@@ -98,10 +114,9 @@ const (
 type challengeTabType int
 
 const (
-	cTabCode        challengeTabType = iota // code textarea (working) or submitted code (result)
-	cTabChat                                // inline concept chat
-	cTabProblem                             // full problem description
-	cTabExplanation                         // feedback + grade (result only)
+	cTabCode    challengeTabType = iota // code textarea (working) or submitted code + grade (result)
+	cTabProblem                         // full problem description
+	cTabChat                            // inline concept chat
 )
 
 // --- Overlay modes ---
@@ -135,7 +150,7 @@ const (
 type chatEntry struct {
 	role       string // "user" or "assistant"
 	content    string
-	durationMs int64 // ms to receive response (assistant only)
+	durationSec float64 // seconds to receive response (assistant only)
 }
 
 // Chat slash commands — typed in chat textarea, expanded before sending to ollama
@@ -148,6 +163,11 @@ var chatSlashCmds = map[string]string{
 	"/deep":     "go deeper — explain the underlying mechanism and internals",
 }
 
+type pendingAlert struct {
+	alertType string
+	message   string
+}
+
 type model struct {
 	// Config
 	brainPath    string
@@ -156,6 +176,10 @@ type model struct {
 	cliDomain    string // CLI arg: only quiz this domain (immutable)
 	domainFilter string // active domain filter (set by tab cycling or CLI)
 	maxQuestions int    // -n flag: max questions per session
+
+	// Ollama request cancellation
+	ollamaCtx    context.Context
+	cancelOllama context.CancelFunc
 
 	// All discovered files
 	allFiles []string
@@ -171,23 +195,23 @@ type model struct {
 	overlayViewport viewport.Model
 
 	// Quiz state
-	reviewFiles     []string // files for review (sorted by confidence)
-	fileIdx         int
-	currentQ        *ollama.Question
-	currentFile     string
-	lastQType       ollama.QuestionType // cached from last question (persists through loading/lesson)
-	lastQDiff       ollama.Difficulty   // cached from last question
-	lastQSet        bool                // true once a question has been received this session
-	grade           gradeKind           // gradeCorrect, gradePartial, gradeWrong
-	ratedConfidence int                 // 0=not yet rated, 1-5=user confidence pick
-	mcPicked        int                 // multiple choice: selected option index
-	mcEliminated    [4]bool             // MC options eliminated by wrong picks
-	mcWrongPicks    int                 // wrong MC attempts before reveal (max 2)
-	answerRevealed  bool                // typed: true once answer/explanation should show
-	gradeFeedback   string              // ollama's feedback on typed answer
-	retryQueue      []string
-	retryPhase      bool // true when working through retry queue
-	retryCount      map[string]int
+	reviewFiles       []string // files for review (sorted by confidence)
+	fileIdx           int
+	currentQ          *ollama.Question
+	currentFile       string
+	lastQType         ollama.QuestionType // cached from last question (persists through loading/lesson)
+	lastQDiff         ollama.Difficulty   // cached from last question
+	lastQSet          bool                // true once a question has been received this session
+	grade             gradeKind           // gradeCorrect, gradePartial, gradeWrong
+	ratedConfidence   int                 // 0=not yet rated, 1-5=user confidence pick
+	mcPicked          int                 // multiple choice: selected option index
+	mcEliminated      [4]bool             // MC options eliminated by wrong picks
+	mcWrongPicks      int                 // wrong MC attempts before reveal (max 2)
+	answerRevealed    bool                // typed: true once answer/explanation should show
+	gradeFeedback     string              // ollama's feedback on typed answer
+	retryQueue        []string
+	retryPhase        bool // true when working through retry queue
+	retryCount        map[string]int
 	reviewQueueCapped bool // true when review list was truncated to maxQuestions (smart review from dashboard)
 
 	// Topic list (browse/pick)
@@ -210,6 +234,12 @@ type model struct {
 	// Settings page
 	settingsCursor  int
 	settingsEditing bool // true when editing brain path in settings
+
+	// Topic list
+	resetConfirm bool // true when waiting for reset confirmation
+
+	// Recent zone
+	recentCursor int
 
 	// Typed answer — textarea
 	answerTA textarea.Model
@@ -256,19 +286,19 @@ type model struct {
 	// Saved textarea content across tab switches
 	savedQuizInput     string // quiz answer textarea content saved when switching away
 	savedChatInput     string // chat textarea content saved when switching away
-	savedChallengeCode string // challenge code textarea content saved when switching away
+	savedChallengeCode string // challenge code textarea content saved when switching to chat/problem tab
 
 	// XP / achievements
 	toast          string               // inline hint toast (audit prompts, etc.)
 	alerts         *bubbleup.AlertModel // bubbleup notification system
-	pendingAlerts  []tea.Cmd            // queued alert cmds to batch on next return
+	pendingAlerts  []pendingAlert       // queued alerts to fire sequentially
 	xpGained       int                  // XP gained this action (for display)
-	xpBreakdown    state.XPBreakdown // breakdown of last XP award (for display)
-	sessionMinConf int               // minimum confidence rated this session (for perfect session achievement)
-	learnChatCount int               // questions asked in current lesson chat (for deep dive achievement)
-	levelUpFrom    int               // previous level before XP award (0 = no level up pending)
-	comboCount     int               // consecutive correct answers (reset on wrong)
-	comboMax       int               // best combo this session
+	xpBreakdown    state.XPBreakdown    // breakdown of last XP award (for display)
+	sessionMinConf int                  // minimum confidence rated this session (for perfect session achievement)
+	learnChatCount int                  // questions asked in current lesson chat (for deep dive achievement)
+	levelUpFrom    int                  // previous level before XP award (0 = no level up pending)
+	comboCount     int                  // consecutive correct answers (reset on wrong)
+	comboMax       int                  // best combo this session
 
 	// Challenge mode
 	challengeStep        challengeStep
@@ -276,12 +306,26 @@ type model struct {
 	currentChallenge     *ollama.Challenge
 	challengeGrade       *ollama.ChallengeGrade
 	challengeCount       int               // challenges completed this session
-	challengeDiff        ollama.Difficulty  // adaptive difficulty for challenges
+	challengeDiff        ollama.Difficulty // adaptive difficulty for challenges
 	challengeCode        string            // submitted code (for viewing on result)
-	challengeExplain     string            // expanded explanation from `e` key on result
+	challengeRetrying    bool              // true when retrying same challenge (skip XP re-award)
 	challengeTopic       string            // user's topic input for challenge chat
 	challengeChatHistory []chatEntry       // conversational flow before generating challenge
 	challengeChatLoading bool              // waiting for ollama response in challenge chat
+	challengeHints       []string          // progressive hints from ctrl+e during working
+
+	// Project scan mode
+	projectStep        projectStep
+	projectRepoPath    string     // path to repo being analyzed
+	projectName        string     // short name (last segment of repo path)
+	projectArchContext string     // CLAUDE.md + README content
+	projectSubsystems  []string   // proposed subsystems from ollama
+	projectSubCursor   int        // cursor in subsystem picker
+	projectSubsystem   string     // selected subsystem slug
+	projectChatHistory  []chatEntry // chat before generation
+	projectChatLoading  bool       // waiting for ollama
+	projectContent      string     // generated knowledge content
+	projectSourceFiles  string     // comma-separated list of files read for current subsystem
 
 	// Daily goal
 	dailyGoal int
@@ -295,6 +339,13 @@ type model struct {
 	// Logging
 	logFile        *os.File
 	logQuestionNum int
+
+	// Enrich (batch difficulty + connection tagging)
+	enrichRunning bool
+	enrichFiles   []string // all files to process
+	enrichIdx     int      // current file index
+	enrichErrors  int      // count of errors so far
+	enrichIndex   string   // cached INDEX.md content for the batch run
 
 	// Stats
 	sessionCorrect int
@@ -324,8 +375,8 @@ const (
 )
 
 func newAlertModel() *bubbleup.AlertModel {
-	am := bubbleup.NewAlertModel(40, false, 3*time.Second)
-	am = &[]bubbleup.AlertModel{(*am).WithPosition(bubbleup.TopRightPosition).WithMinWidth(20)}[0]
+	am := bubbleup.NewAlertModel(40, false, 5*time.Second)
+	am = &[]bubbleup.AlertModel{(*am).WithPosition(bubbleup.BottomRightPosition).WithMinWidth(20)}[0]
 	am.RegisterNewAlertType(bubbleup.AlertDefinition{
 		Key: alertLevelUp, ForeColor: string(colorYellow), Prefix: "✦ ",
 	})
@@ -379,46 +430,65 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 		allOn[i] = true
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return model{
-		brainPath:       brainPath,
-		ollama:          ollama.New(),
-		cliDomain:       domainFilter,
-		domainFilter:    domainFilter,
-		maxQuestions:    maxQuestions,
-		dailyGoal:       dailyGoal,
-		phase:           phaseDashboard,
-		quizStep:        stepLoading,
-		learnStep:       learnInput,
-		activeOverlay:   overlayNone,
-		spinner:         sp,
-		alerts:          newAlertModel(),
-		answerTA:        ansTA,
-		learnTA:         learnTA,
-		pickSearch:      searchTI,
-		viewport:        vp,
-		overlayViewport: ovp,
+		brainPath:        brainPath,
+		ollama:           ollama.New(),
+		ollamaCtx:        ctx,
+		cancelOllama:     cancel,
+		cliDomain:        domainFilter,
+		domainFilter:     domainFilter,
+		maxQuestions:     maxQuestions,
+		dailyGoal:        dailyGoal,
+		phase:            phaseDashboard,
+		quizStep:         stepLoading,
+		learnStep:        learnInput,
+		activeOverlay:    overlayNone,
+		spinner:          sp,
+		alerts:           newAlertModel(),
+		answerTA:         ansTA,
+		learnTA:          learnTA,
+		pickSearch:       searchTI,
+		viewport:         vp,
+		overlayViewport:  ovp,
 		sessionDomains:   make(map[string]bool),
 		sessionRecordIdx: -1,
 		activeTypes:      allOn,
-		sessionMinConf:  6, // higher than max so first rating always sets it
+		sessionMinConf:   6, // higher than max so first rating always sets it
 	}
 }
 
-// queueAlert queues a bubbleup notification to fire on the next Update return.
+// newOllamaCtx cancels any in-flight ollama request and creates a fresh context for the next one.
+func (m *model) newOllamaCtx() {
+	if m.cancelOllama != nil {
+		m.cancelOllama()
+	}
+	m.ollamaCtx, m.cancelOllama = context.WithCancel(context.Background())
+}
+
+// pendingAlert holds a queued notification to fire sequentially.
+// fireNextAlertMsg triggers the next queued alert after a delay.
+type fireNextAlertMsg struct{}
+
+// queueAlert queues a bubbleup notification to fire sequentially.
 func (m *model) queueAlert(alertType, message string) {
-	if m.alerts != nil {
-		m.pendingAlerts = append(m.pendingAlerts, m.alerts.NewAlertCmd(alertType, message))
-	}
+	m.pendingAlerts = append(m.pendingAlerts, pendingAlert{alertType, message})
 }
 
-// flushAlerts returns a batched cmd of all pending alerts and clears the queue.
+// flushAlerts fires the first pending alert immediately; the rest fire sequentially via fireNextAlertMsg.
 func (m *model) flushAlerts(cmd tea.Cmd) tea.Cmd {
-	if len(m.pendingAlerts) == 0 {
+	if len(m.pendingAlerts) == 0 || m.alerts == nil {
 		return cmd
 	}
-	cmds := append(m.pendingAlerts, cmd)
-	m.pendingAlerts = nil
-	return tea.Batch(cmds...)
+	first := m.pendingAlerts[0]
+	m.pendingAlerts = m.pendingAlerts[1:]
+	alertCmd := m.alerts.NewAlertCmd(first.alertType, first.message)
+	if len(m.pendingAlerts) > 0 {
+		delay := tea.Tick(2500*time.Millisecond, func(time.Time) tea.Msg { return fireNextAlertMsg{} })
+		return tea.Batch(cmd, alertCmd, delay)
+	}
+	return tea.Batch(cmd, alertCmd)
 }
 
 func (m model) currentDomain() string {
@@ -723,36 +793,77 @@ func renderMarkdown(content string, w int) string {
 	var b strings.Builder
 	lines := strings.Split(content, "\n")
 	inCodeBlock := false
-	for _, line := range lines {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "```"):
 			inCodeBlock = !inCodeBlock
 			if inCodeBlock {
+				lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
 				b.WriteString("\n")
+				if lang != "" {
+					b.WriteString(dimStyle.PaddingLeft(4).Render(lang))
+					b.WriteString("\n")
+				}
 			}
 		case inCodeBlock:
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render(highlightSyntax(line)))
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorText).Render(highlightSyntax(line)))
+			b.WriteString("\n")
+		case isTableSep(trimmed):
+			// skip |---|---| separator rows — visual noise
+		case strings.HasPrefix(trimmed, "|"):
+			isHeader := i+1 < len(lines) && isTableSep(strings.TrimSpace(lines[i+1]))
+			b.WriteString(renderTableRow(trimmed, isHeader))
+			b.WriteString("\n")
+		case strings.HasPrefix(trimmed, "### "):
+			header := strings.TrimPrefix(trimmed, "### ")
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorYellow).PaddingLeft(2).Render(header))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "## "):
 			header := strings.TrimPrefix(trimmed, "## ")
 			b.WriteString("\n")
-			b.WriteString(sectionHeaderStyle.PaddingLeft(2).Render(header))
+			if header == "Connections" {
+				b.WriteString(dimStyle.Bold(true).PaddingLeft(2).Render(header))
+			} else {
+				b.WriteString(sectionHeaderStyle.PaddingLeft(2).Render(header))
+			}
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "# "):
 			header := strings.TrimPrefix(trimmed, "# ")
 			b.WriteString(titleStyle.PaddingLeft(2).Width(w).Render(header))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "- "):
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "- "))))
+			inner := strings.TrimPrefix(trimmed, "- ")
+			if strings.HasPrefix(inner, "requires:") {
+				b.WriteString(dimStyle.Width(w).PaddingLeft(4).Render("· " + inner))
+			} else {
+				base := lipgloss.NewStyle().Foreground(colorText)
+				b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorText).Render("· " + renderInline(inner, base)))
+			}
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "* "):
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "* "))))
+			base := lipgloss.NewStyle().Foreground(colorText)
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorText).Render("· " + renderInline(strings.TrimPrefix(trimmed, "* "), base)))
+			b.WriteString("\n")
+		case isNumberedItem(trimmed):
+			dot := strings.Index(trimmed, ". ")
+			num := trimmed[:dot]
+			inner := trimmed[dot+2:]
+			base := lipgloss.NewStyle().Foreground(colorText)
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorText).Render(
+				lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(num+".") + " " + renderInline(inner, base),
+			))
 			b.WriteString("\n")
 		case trimmed == "":
 			b.WriteString("\n")
 		default:
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(2).Render(renderInline(line)))
+			base := lipgloss.NewStyle().Foreground(colorText)
+			style := lipgloss.NewStyle().Width(w).PaddingLeft(2).Foreground(colorText)
+			if isColonLine(trimmed) {
+				base = lipgloss.NewStyle().Foreground(colorYellow)
+				style = lipgloss.NewStyle().Width(w).PaddingLeft(2).Foreground(colorYellow)
+			}
+			b.WriteString(style.Render(renderInline(line, base)))
 			b.WriteString("\n")
 		}
 	}
@@ -764,31 +875,63 @@ func renderExplanation(content string, w int) string {
 	var b strings.Builder
 	lines := strings.Split(content, "\n")
 	inCodeBlock := false
-	for _, line := range lines {
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "```"):
 			inCodeBlock = !inCodeBlock
 			if inCodeBlock {
+				lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
 				b.WriteString("\n")
+				if lang != "" {
+					b.WriteString(dimStyle.PaddingLeft(4).Render(lang))
+					b.WriteString("\n")
+				}
 			}
 		case inCodeBlock:
-			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Render(highlightSyntax(line)))
+			b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(4).Foreground(colorText).Render(highlightSyntax(line)))
+			b.WriteString("\n")
+		case isTableSep(trimmed):
+			// skip
+		case strings.HasPrefix(trimmed, "|"):
+			isHeader := i+1 < len(lines) && isTableSep(strings.TrimSpace(lines[i+1]))
+			b.WriteString(renderTableRow(trimmed, isHeader))
+			b.WriteString("\n")
+		case strings.HasPrefix(trimmed, "### "):
+			header := strings.TrimPrefix(trimmed, "### ")
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorYellow).PaddingLeft(2).Render(header))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "## "):
 			header := strings.TrimPrefix(trimmed, "## ")
 			b.WriteString("\n")
-			b.WriteString(sectionHeaderStyle.PaddingLeft(2).Render(header))
+			if header == "Connections" {
+				b.WriteString(dimStyle.Bold(true).PaddingLeft(2).Render(header))
+			} else {
+				b.WriteString(sectionHeaderStyle.PaddingLeft(2).Render(header))
+			}
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "# "):
 			header := strings.TrimPrefix(trimmed, "# ")
 			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).PaddingLeft(2).Width(w).Render(header))
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "- "):
-			b.WriteString(explainStyle.Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "- "), explainStyle)))
+			inner := strings.TrimPrefix(trimmed, "- ")
+			if strings.HasPrefix(inner, "requires:") {
+				b.WriteString(dimStyle.Width(w).PaddingLeft(4).Render("· " + inner))
+			} else {
+				b.WriteString(explainStyle.Width(w).PaddingLeft(4).Render("· " + renderInline(inner, explainStyle)))
+			}
 			b.WriteString("\n")
 		case strings.HasPrefix(trimmed, "* "):
 			b.WriteString(explainStyle.Width(w).PaddingLeft(4).Render("· " + renderInline(strings.TrimPrefix(trimmed, "* "), explainStyle)))
+			b.WriteString("\n")
+		case isNumberedItem(trimmed):
+			dot := strings.Index(trimmed, ". ")
+			num := trimmed[:dot]
+			inner := trimmed[dot+2:]
+			b.WriteString(explainStyle.Width(w).PaddingLeft(4).Render(
+				lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(num+".") + " " + renderInline(inner, explainStyle),
+			))
 			b.WriteString("\n")
 		case trimmed == "":
 			b.WriteString("\n")
@@ -822,7 +965,7 @@ func renderInline(text string, base ...lipgloss.Style) string {
 	i := 0
 	for i < len(text) {
 		// Bold: **text**
-		if i+1 < len(text) && text[i] == '*' && text[i+1] == '*' {
+		if text[i] < 0x80 && i+1 < len(text) && text[i] == '*' && text[i+1] == '*' {
 			end := strings.Index(text[i+2:], "**")
 			if end >= 0 {
 				flushPlain()
@@ -835,12 +978,16 @@ func renderInline(text string, base ...lipgloss.Style) string {
 				continue
 			}
 		}
-		// Inline code: `text`
-		if text[i] == '`' {
+		// Inline code: `text` — accent (blue) when inside a colored base to ensure contrast
+		if text[i] < 0x80 && text[i] == '`' {
 			end := strings.Index(text[i+1:], "`")
 			if end >= 0 {
 				flushPlain()
-				b.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render(text[i+1 : i+1+end]))
+				codeColor := colorYellow
+				if hasBase {
+					codeColor = colorAccent
+				}
+				b.WriteString(lipgloss.NewStyle().Foreground(codeColor).Render(text[i+1 : i+1+end]))
 				i = i + 1 + end + 1
 				continue
 			}
@@ -901,6 +1048,28 @@ var codeKeywords = map[string]bool{
 	// Docker
 	"COPY": true, "RUN": true, "CMD": true, "ENTRYPOINT": true, "EXPOSE": true,
 	"ENV": true, "ARG": true, "WORKDIR": true, "VOLUME": true,
+	// Lua (avoiding duplicates with Go/Python/shell: then/require/error already present)
+	"local": true, "end": true, "elseif": true, "repeat": true, "until": true,
+	"ipairs": true, "pairs": true, "pcall": true, "xpcall": true,
+	"tostring": true, "tonumber": true, "setmetatable": true, "getmetatable": true,
+	"rawget": true, "rawset": true,
+	// SQL types (uppercase to match convention)
+	"SERIAL": true, "VARCHAR": true, "TEXT": true, "BOOLEAN": true,
+	"INTEGER": true, "BIGINT": true, "TIMESTAMP": true, "JSONB": true,
+	"FLOAT": true, "DECIMAL": true, "NUMERIC": true, "ARRAY": true, "UUID": true,
+	"SMALLINT": true, "REAL": true, "CHAR": true, "DATE": true, "TIME": true,
+	// HTTP methods (uppercase convention — won't collide with code keywords)
+	"GET": true, "POST": true, "PUT": true, "PATCH": true,
+	"HEAD": true, "OPTIONS": true, "CONNECT": true, "TRACE": true,
+	// Java-specific (not already covered by JS/TS section)
+	"public": true, "private": true, "protected": true, "final": true,
+	"abstract": true, "synchronized": true, "throws": true,
+	// TypeScript-specific (not already covered)
+	"declare": true, "readonly": true, "keyof": true, "infer": true,
+	"never": true, "unknown": true, "any": true,
+	// C/C++
+	"include": true, "define": true, "ifdef": true, "endif": true,
+	"template": true, "typename": true, "nullptr": true, "sizeof": true, "typedef": true,
 	// HTML/CSS (distinct enough to not collide with variable names)
 	"DOCTYPE": true, "getElementById": true, "querySelector": true,
 	"addEventListener": true, "innerHTML": true, "className": true,
@@ -911,6 +1080,10 @@ var codeKeywords = map[string]bool{
 
 // highlightSyntax applies basic keyword/string/comment/number coloring to a code line.
 func highlightSyntax(line string) string {
+	// Box drawing / file tree lines — don't syntax-highlight, render neutral
+	if strings.ContainsAny(line, "├└│┌┐┘┬┤┴┼─") {
+		return lipgloss.NewStyle().Foreground(colorDim).Render(line)
+	}
 	var b strings.Builder
 	i := 0
 	for i < len(line) {
@@ -943,7 +1116,7 @@ func highlightSyntax(line string) string {
 			if codeKeywords[word] {
 				b.WriteString(lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(word))
 			} else {
-				b.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render(word))
+				b.WriteString(lipgloss.NewStyle().Foreground(colorText).Render(word))
 			}
 			i = j
 			continue
@@ -958,9 +1131,61 @@ func highlightSyntax(line string) string {
 			i = j
 			continue
 		}
-		// Operators / punctuation — subtle
-		b.WriteString(lipgloss.NewStyle().Foreground(colorYellow).Render(string(line[i])))
-		i++
+		// Operators / punctuation — plain
+		r, size := utf8.DecodeRuneInString(line[i:])
+		b.WriteRune(r)
+		i += size
+	}
+	return b.String()
+}
+
+// isColonLine returns true if a line looks like a "Key: value" or definition line.
+func isColonLine(line string) bool {
+	idx := strings.Index(line, ": ")
+	return idx > 0 && idx < 40
+}
+
+// isTableSep returns true for markdown table separator rows like |---|---|.
+func isTableSep(line string) bool {
+	return strings.HasPrefix(line, "|") && strings.Contains(line, "---")
+}
+
+// isNumberedItem returns true for lines like "1. text" or "12. text".
+func isNumberedItem(line string) bool {
+	for i := 0; i < len(line) && i < 4; i++ {
+		if line[i] == '.' {
+			return i > 0 && i+2 < len(line) && line[i+1] == ' '
+		}
+		if line[i] < '0' || line[i] > '9' {
+			return false
+		}
+	}
+	return false
+}
+
+// renderTableRow renders a markdown table row with styled pipes and cells.
+// Header rows (before a separator line) are bolded in accent color.
+func renderTableRow(line string, isHeader bool) string {
+	parts := strings.Split(line, "|")
+	// parts[0] = before first |, parts[last] = after last | — skip both
+	if len(parts) < 3 {
+		return dimStyle.Render(line)
+	}
+	cells := parts[1 : len(parts)-1]
+	pipe := dimStyle.Render("│")
+	var b strings.Builder
+	b.WriteString("  " + pipe)
+	for i, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		var rendered string
+		if isHeader {
+			rendered = lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(" " + cell + " ")
+		} else if i == 0 {
+			rendered = lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(" " + cell + " ")
+		} else {
+			rendered = lipgloss.NewStyle().Foreground(colorText).Render(" " + cell + " ")
+		}
+		b.WriteString(rendered + pipe)
 	}
 	return b.String()
 }
@@ -973,23 +1198,35 @@ func isCodeDigit(b byte) bool {
 	return b >= '0' && b <= '9'
 }
 
+// casinoTier represents a bonus tier for notifications.
+type casinoTier int
+
+const (
+	casinoNormal  casinoTier = iota
+	casinoNice               // nice: +8-20
+	casinoLucky              // lucky: +20-40
+	casinoJackpot            // jackpot: +50-100
+)
+
 // rollCasinoBonus generates a random XP bonus with tiered drop rates.
-// Combo count amplifies the bonus. Returns bonus amount and whether jackpot was hit.
-func rollCasinoBonus(comboCount int) (bonus int, hitJackpot bool) {
+// Combo count amplifies the bonus. Returns bonus amount and tier hit.
+func rollCasinoBonus(comboCount int) (bonus int, tier casinoTier) {
 	bonus = 3 + rand.Intn(6) // 3-8 always
 	roll := rand.Intn(100)
 	if roll < 3 {
 		bonus += 50 + rand.Intn(51)
-		hitJackpot = true
+		tier = casinoJackpot
 	} else if roll < 15 {
 		bonus += 20 + rand.Intn(21)
+		tier = casinoLucky
 	} else if roll < 35 {
 		bonus += 8 + rand.Intn(13)
+		tier = casinoNice
 	}
 	if comboCount >= 2 {
 		bonus = int(float64(bonus) * (1.0 + float64(comboCount)*0.15))
 	}
-	return bonus, hitJackpot
+	return bonus, tier
 }
 
 // openNotesOverlay opens the notes editor overlay for the current file.
@@ -1016,9 +1253,10 @@ func divider(label string, w int) string {
 		return dimStyle.Render("  " + strings.Repeat("─", w))
 	}
 	text := " " + label + " "
-	remaining := w - len(text) - 2
+	prefix := "  ──"
+	remaining := w - lipgloss.Width(prefix) - lipgloss.Width(text)
 	if remaining < 2 {
 		remaining = 2
 	}
-	return dimStyle.Render("  ──" + text + strings.Repeat("─", remaining))
+	return dimStyle.Render(prefix) + labelStyle.Render(text) + dimStyle.Render(strings.Repeat("─", remaining))
 }

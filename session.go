@@ -73,6 +73,8 @@ func (m *model) applyReviewQueuePipeline(files []string) []string {
 		reviewFiles = interleaveByDomain(reviewFiles, 2, m.depGraph)
 	}
 
+	reviewFiles = m.applyDifficultyGating(reviewFiles)
+
 	return reviewFiles
 }
 
@@ -181,7 +183,7 @@ func (m *model) nextQuestion() tea.Cmd {
 		m.quizStep = stepLoading
 		m.ratedConfidence = 0
 		openQuestionLog(m)
-		return generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
+		return generateQuestion(m.ollamaCtx, m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	}
 
 	m.fileIdx++
@@ -199,7 +201,7 @@ func (m *model) nextQuestion() tea.Cmd {
 		m.quizStep = stepLoading
 		m.ratedConfidence = 0
 		openQuestionLog(m)
-		return generateQuestion(m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
+		return generateQuestion(m.ollamaCtx, m.ollama, m.brainPath, m.currentFile, m.randomActiveType(), diff)
 	}
 	return m.finishSession()
 }
@@ -301,6 +303,68 @@ func interleaveByDomain(files []string, maxConsecutive int, graph *knowledge.Dep
 		}
 	}
 	return result
+}
+
+// applyDifficultyGating reorders files within each domain so that medium/hard topics
+// are only promoted once the easier tier avg confidence crosses a threshold.
+// Below the threshold, harder files are moved to the back of the domain's slot.
+// Threshold: avg confidence >= 3 in the lower tier unlocks the next tier.
+func (m *model) applyDifficultyGating(files []string) []string {
+	if len(files) == 0 {
+		return files
+	}
+
+	// Group by domain and tier, compute avg confidence per tier per domain.
+	type tierKey struct{ domain, diff string }
+	tierConf := make(map[tierKey][]float64)
+	fileDiff := make(map[string]string)
+
+	for _, f := range files {
+		dom := knowledge.Domain(f)
+		d := knowledge.ReadDifficultyFromFile(m.brainPath, f)
+		fileDiff[f] = d
+		k := tierKey{dom, d}
+		tierConf[k] = append(tierConf[k], float64(m.state.GetConfidence(f)))
+	}
+
+	avgTier := func(dom, diff string) float64 {
+		vals := tierConf[tierKey{dom, diff}]
+		if len(vals) == 0 {
+			return 0
+		}
+		var sum float64
+		for _, v := range vals {
+			sum += v
+		}
+		return sum / float64(len(vals))
+	}
+
+	// Determine readiness: medium unlocked when easy avg >= 3; hard when medium avg >= 3.
+	unlocked := func(dom, diff string) bool {
+		switch diff {
+		case "easy":
+			return true
+		case "medium":
+			return avgTier(dom, "easy") >= 3.0
+		case "hard":
+			return avgTier(dom, "medium") >= 3.0
+		}
+		return true
+	}
+
+	// Stable partition: move locked (not yet unlocked) files to end of their domain group.
+	// We do a single pass keeping relative order within each partition.
+	var ready, notReady []string
+	for _, f := range files {
+		dom := knowledge.Domain(f)
+		d := fileDiff[f]
+		if unlocked(dom, d) {
+			ready = append(ready, f)
+		} else {
+			notReady = append(notReady, f)
+		}
+	}
+	return append(ready, notReady...)
 }
 
 func slugify(s string) string {

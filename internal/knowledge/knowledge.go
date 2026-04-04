@@ -3,6 +3,7 @@ package knowledge
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -53,8 +54,12 @@ func WriteFile(brainPath, domain, slug, content string) (string, error) {
 }
 
 // Domain extracts the domain from a relative path (e.g., "knowledge/linux-cli/foo.md" -> "linux-cli").
+// Special case: "knowledge/projects/unrot/foo.md" -> "projects/unrot" (two-level domain).
 func Domain(relPath string) string {
 	parts := strings.Split(relPath, string(filepath.Separator))
+	if len(parts) >= 4 && parts[1] == "projects" {
+		return parts[1] + "/" + parts[2]
+	}
 	if len(parts) >= 2 {
 		return parts[1]
 	}
@@ -75,20 +80,26 @@ func Domains(paths []string) []string {
 	return result
 }
 
-// ExtractNotes pulls the ## Notes section content from file content.
-func ExtractNotes(content string) string {
-	const marker = "## Notes"
+// sectionContent extracts the body of a ## Heading section, stopping at the next ## heading.
+func sectionContent(content, marker string) (string, bool) {
 	idx := strings.Index(content, marker)
 	if idx < 0 {
-		return ""
+		return "", false
 	}
 	rest := content[idx+len(marker):]
-	rest = strings.TrimLeft(rest, "\n")
-	nextH2 := strings.Index(rest, "\n## ")
-	if nextH2 >= 0 {
+	if nextH2 := strings.Index(rest, "\n## "); nextH2 >= 0 {
 		rest = rest[:nextH2]
 	}
-	return strings.TrimSpace(rest)
+	return rest, true
+}
+
+// ExtractNotes pulls the ## Notes section content from file content.
+func ExtractNotes(content string) string {
+	body, ok := sectionContent(content, "## Notes")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimLeft(body, "\n"))
 }
 
 // UpdateNotes replaces or appends the ## Notes section in a knowledge file.
@@ -130,15 +141,9 @@ func UpdateNotes(brainPath, relPath, notes string) error {
 // ParsePrereqs extracts prerequisite references from the ## Connections section.
 // Looks for lines matching "- requires: domain/slug" and returns normalized paths.
 func ParsePrereqs(content string) []string {
-	const marker = "## Connections"
-	idx := strings.Index(content, marker)
-	if idx < 0 {
+	rest, ok := sectionContent(content, "## Connections")
+	if !ok {
 		return nil
-	}
-	rest := content[idx+len(marker):]
-	// Stop at next ## section
-	if nextH2 := strings.Index(rest, "\n## "); nextH2 >= 0 {
-		rest = rest[:nextH2]
 	}
 	var prereqs []string
 	for _, line := range strings.Split(rest, "\n") {
@@ -168,6 +173,145 @@ func ResolvePrereqPath(ref string) string {
 	ref = strings.TrimPrefix(ref, "knowledge/")
 	ref = strings.TrimSuffix(ref, ".md")
 	return "knowledge/" + ref + ".md"
+}
+
+// ReadDifficulty extracts the difficulty tag from the ## Connections section.
+// Returns "easy", "medium", or "hard". Defaults to "medium" if not tagged.
+func ReadDifficulty(content string) string {
+	rest, ok := sectionContent(content, "## Connections")
+	if !ok {
+		return "medium"
+	}
+	for _, line := range strings.Split(rest, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- difficulty:") || strings.HasPrefix(line, "* difficulty:") {
+			parts := strings.SplitN(line, "difficulty:", 2)
+			if len(parts) >= 2 {
+				d := strings.TrimSpace(parts[1])
+				if d == "easy" || d == "medium" || d == "hard" {
+					return d
+				}
+			}
+		}
+	}
+	return "medium"
+}
+
+// ReadDifficultyFromFile reads difficulty from a knowledge file on disk.
+// Returns "medium" on any error.
+func ReadDifficultyFromFile(brainPath, relPath string) string {
+	absPath := filepath.Join(brainPath, relPath)
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return "medium"
+	}
+	return ReadDifficulty(string(data))
+}
+
+// UpdateConnections writes difficulty and merged requires: lines to ## Connections.
+// Existing requires: lines are preserved and merged with newConnections (no duplicates).
+// difficulty replaces any existing difficulty line.
+func UpdateConnections(brainPath, relPath, difficulty string, newConnections []string) error {
+	absPath := filepath.Join(brainPath, relPath)
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+
+	// Merge existing + new connections (dedup)
+	existing := ParsePrereqs(content)
+	prereqSet := make(map[string]bool)
+	for _, p := range existing {
+		prereqSet[p] = true
+	}
+	for _, c := range newConnections {
+		resolved := ResolvePrereqPath(c)
+		// Skip self-references
+		if resolved == relPath {
+			continue
+		}
+		prereqSet[resolved] = true
+	}
+
+	// Build sorted list of requires lines
+	var prereqSlice []string
+	for p := range prereqSet {
+		ref := strings.TrimPrefix(p, "knowledge/")
+		ref = strings.TrimSuffix(ref, ".md")
+		prereqSlice = append(prereqSlice, ref)
+	}
+	sort.Strings(prereqSlice)
+
+	var lines []string
+	lines = append(lines, "- difficulty: "+difficulty)
+	for _, ref := range prereqSlice {
+		lines = append(lines, "- requires: "+ref)
+	}
+	newSection := "\n\n## Connections\n" + strings.Join(lines, "\n") + "\n"
+
+	const marker = "## Connections"
+	connIdx := strings.Index(content, marker)
+	if connIdx >= 0 {
+		before := content[:connIdx]
+		after := content[connIdx+len(marker):]
+		if nextH2 := strings.Index(after, "\n## "); nextH2 >= 0 {
+			content = strings.TrimRight(before, "\n") + newSection + after[nextH2:]
+		} else {
+			content = strings.TrimRight(before, "\n") + newSection
+		}
+	} else {
+		content = strings.TrimRight(content, "\n") + newSection
+	}
+
+	return os.WriteFile(absPath, []byte(content), 0644)
+}
+
+// SourceMeta holds metadata from the ## Source section of project knowledge files.
+type SourceMeta struct {
+	Repo     string // absolute path to the source repo
+	Files    string // comma-separated list of analyzed files
+	Analyzed string // date string (2006-01-02)
+	Commit   string // short commit hash at time of analysis
+}
+
+// ParseSource extracts ## Source metadata from a knowledge file's content.
+func ParseSource(content string) *SourceMeta {
+	body, ok := sectionContent(content, "## Source")
+	if !ok {
+		return nil
+	}
+	meta := &SourceMeta{}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		if after, ok := strings.CutPrefix(line, "repo:"); ok {
+			meta.Repo = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "files:"); ok {
+			meta.Files = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "analyzed:"); ok {
+			meta.Analyzed = strings.TrimSpace(after)
+		} else if after, ok := strings.CutPrefix(line, "commit:"); ok {
+			meta.Commit = strings.TrimSpace(after)
+		}
+	}
+	return meta
+}
+
+// FormatSource generates a ## Source markdown section from metadata.
+func FormatSource(meta *SourceMeta) string {
+	var b strings.Builder
+	b.WriteString("## Source\n")
+	b.WriteString("- repo: " + meta.Repo + "\n")
+	b.WriteString("- files: " + meta.Files + "\n")
+	b.WriteString("- analyzed: " + meta.Analyzed + "\n")
+	b.WriteString("- commit: " + meta.Commit + "\n")
+	return b.String()
+}
+
+// IsProjectDomain returns true if the domain is a two-level projects/ domain.
+func IsProjectDomain(domain string) bool {
+	return strings.HasPrefix(domain, "projects/")
 }
 
 // FilterByDomain returns only paths matching the given domain.

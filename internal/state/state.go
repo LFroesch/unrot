@@ -17,6 +17,7 @@ type FileState struct {
 	Wrong        int       `json:"wrong"`
 	Confidence   int       `json:"confidence"` // 0=new/unrated, 1-5 user-set
 	Streak       int       `json:"streak"`
+	ReviewCount  int       `json:"review_count,omitempty"` // times confidence has been rated
 }
 
 // SessionRecord captures one completed quiz session.
@@ -84,6 +85,16 @@ const (
 	AchEarlyBird  = "early_bird" // Session before 7am
 	AchComeback   = "comeback"   // Wrong answer → retry → correct on same file
 	AchChatterbox = "chatterbox" // 10+ messages in one chat session
+
+	// Challenge
+	AchChallengeFirst = "challenge_first" // First challenge completed
+	AchChallenge10    = "challenge_10"    // 10 challenges completed
+	AchPerfect100     = "perfect_100"     // Score 100 on a challenge
+
+	// Mastery
+	AchAuditFix   = "audit_fix"   // Applied first audit fix
+	AchNoteTaker  = "note_taker"  // Banked notes 5 times
+	AchBigSession = "big_session" // 50 questions in one session
 )
 
 // AchievementInfo maps IDs to display names and descriptions.
@@ -126,6 +137,14 @@ var AchievementInfo = map[string]struct{ Name, Desc string }{
 	AchEarlyBird:  {"Early Bird", "studying before 7am"},
 	AchComeback:   {"Comeback", "wrong → retry → nailed it"},
 	AchChatterbox: {"Chatterbox", "10+ messages in one chat"},
+	// Challenge
+	AchChallengeFirst: {"Code Monkey", "completed your first challenge"},
+	AchChallenge10:    {"Grinder", "10 challenges completed"},
+	AchPerfect100:     {"Flawless Code", "scored 100 on a challenge"},
+	// Mastery
+	AchAuditFix:   {"Fact Checker", "applied your first AI audit fix"},
+	AchNoteTaker:  {"Note Hoarder", "banked chat insights 5 times"},
+	AchBigSession: {"Iron Mind", "50 questions in one session"},
 }
 
 // AllAchievements returns all achievement IDs in display order.
@@ -146,6 +165,10 @@ var AllAchievements = []string{
 	AchFirstLock, AchTenLocked,
 	// Fun / rare
 	AchJackpot, AchNightOwl, AchEarlyBird, AchComeback, AchChatterbox,
+	// Challenge
+	AchChallengeFirst, AchChallenge10, AchPerfect100,
+	// Mastery
+	AchAuditFix, AchNoteTaker, AchBigSession,
 }
 
 // AchievementContext holds everything needed to check achievement conditions.
@@ -160,38 +183,56 @@ type AchievementContext struct {
 	LockedCount     int  // files at confidence 5
 	HitJackpot      bool // hit a jackpot bonus this question
 	IsComeback      bool // wrong → retry → correct on same file
+	ChallengeScore  int  // 0-100, only checked when IsChallenge=true
+	IsChallenge     bool // was this a challenge (not a quiz question)
+	AppliedAuditFix bool // just applied an audit fix
+}
+
+// RecentQuestion records a single answered question for the recent zone.
+type RecentQuestion struct {
+	File      string    `json:"file"`
+	QType     string    `json:"qtype"`
+	Question  string    `json:"question"`
+	Correct   bool      `json:"correct"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // stateJSON is the on-disk format.
 type stateJSON struct {
-	Files           map[string]*FileState `json:"files"`
-	Sessions        []SessionRecord       `json:"sessions"`
-	DayStreak       int                   `json:"day_streak"`
-	LastSessionDate string                `json:"last_session_date"`
-	TotalXP         int                   `json:"total_xp"`
-	TotalQuestions  int                   `json:"total_questions"`
-	Achievements    []string              `json:"achievements,omitempty"`
-	Favorites       []string              `json:"favorites,omitempty"`
-	MaxQuestions    int                   `json:"max_questions,omitempty"`
-	ChallengeDiff   int                   `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
-	BrainPath       string                `json:"brain_path,omitempty"`
-	LogCalls        bool                  `json:"log_calls,omitempty"`
+	Files            map[string]*FileState `json:"files"`
+	Sessions         []SessionRecord       `json:"sessions"`
+	DayStreak        int                   `json:"day_streak"`
+	LastSessionDate  string                `json:"last_session_date"`
+	TotalXP          int                   `json:"total_xp"`
+	TotalQuestions   int                   `json:"total_questions"`
+	Achievements     []string              `json:"achievements,omitempty"`
+	Favorites        []string              `json:"favorites,omitempty"`
+	MaxQuestions     int                   `json:"max_questions,omitempty"`
+	ChallengeDiff    int                   `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	BrainPath        string                `json:"brain_path,omitempty"`
+	LogCalls         bool                  `json:"log_calls,omitempty"`
+	TotalChallenges  int                   `json:"total_challenges,omitempty"`
+	NotesBanked      int                   `json:"notes_banked,omitempty"`
+	RecentQuestions  []RecentQuestion      `json:"recent_questions,omitempty"`
 }
 
 type State struct {
-	Files           map[string]*FileState
-	Sessions        []SessionRecord
-	DayStreak       int
-	LastSessionDate string // "2006-01-02"
-	TotalXP         int
-	TotalQuestions  int
-	Achievements    []string
-	Favorites       map[string]bool
-	MaxQuestions    int    // 0 = use default (5)
-	ChallengeDiff   int    // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
-	BrainPath       string // user-configured knowledge path
-	LogCalls        bool   // log all ollama requests/responses to file
-	path            string
+	Files            map[string]*FileState
+	Sessions         []SessionRecord
+	DayStreak        int
+	LastSessionDate  string // "2006-01-02"
+	TotalXP          int
+	TotalQuestions   int
+	Achievements     []string
+	Favorites        map[string]bool
+	MaxQuestions     int    // 0 = use default (5)
+	ChallengeDiff    int    // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	BrainPath        string // user-configured knowledge path
+	LogCalls         bool   // log all ollama requests/responses to file
+	TotalChallenges  int    // lifetime challenges completed
+	NotesBanked      int    // lifetime notes banked from chat
+	RecentQuestions  []RecentQuestion // last 10 answered questions
+	path             string
 }
 
 func Load() (*State, error) {
@@ -248,6 +289,9 @@ func Load() (*State, error) {
 	s.ChallengeDiff = v2.ChallengeDiff
 	s.BrainPath = v2.BrainPath
 	s.LogCalls = v2.LogCalls
+	s.TotalChallenges = v2.TotalChallenges
+	s.NotesBanked = v2.NotesBanked
+	s.RecentQuestions = v2.RecentQuestions
 
 	// Migrate: compute confidence from old correct/wrong/streak if not set
 	for _, fs := range s.Files {
@@ -302,12 +346,30 @@ func (s *State) Save() error {
 		ChallengeDiff:   s.ChallengeDiff,
 		BrainPath:       s.BrainPath,
 		LogCalls:        s.LogCalls,
+		TotalChallenges: s.TotalChallenges,
+		NotesBanked:     s.NotesBanked,
+		RecentQuestions: s.RecentQuestions,
 	}
 	data, err := json.MarshalIndent(v2, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.path, data, 0644)
+}
+
+// AddRecentQuestion prepends a question to the recent list (max 10).
+func (s *State) AddRecentQuestion(file, qtype, question string, correct bool) {
+	rq := RecentQuestion{
+		File:      file,
+		QType:     qtype,
+		Question:  question,
+		Correct:   correct,
+		Timestamp: time.Now(),
+	}
+	s.RecentQuestions = append([]RecentQuestion{rq}, s.RecentQuestions...)
+	if len(s.RecentQuestions) > 10 {
+		s.RecentQuestions = s.RecentQuestions[:10]
+	}
 }
 
 // Record tracks a correct/wrong answer for session stats.
@@ -323,7 +385,7 @@ func (s *State) Record(path string, correct bool) {
 	}
 }
 
-// SetConfidence sets the user's confidence rating for a file.
+// SetConfidence sets the user's confidence rating for a file and increments ReviewCount.
 func (s *State) SetConfidence(path string, level int) {
 	fs := s.ensureFile(path)
 	if level < 0 {
@@ -333,6 +395,23 @@ func (s *State) SetConfidence(path string, level int) {
 		level = 5
 	}
 	fs.Confidence = level
+	fs.ReviewCount++
+}
+
+// EffectiveConfidence returns a blended confidence that accounts for repetition count.
+// A self-rated "5" after 1 review only carries partial weight until the file is seen enough times.
+// targetReps = 4: full weight at 4+ reviews.
+func (s *State) EffectiveConfidence(path string) float64 {
+	fs := s.Files[path]
+	if fs == nil {
+		return 0
+	}
+	const targetReps = 4
+	weight := float64(fs.ReviewCount) / targetReps
+	if weight > 1.0 {
+		weight = 1.0
+	}
+	return float64(fs.Confidence) * weight
 }
 
 // GetConfidence returns the confidence level for a file (0=new/unrated).
@@ -378,7 +457,9 @@ func (s *State) FilesByPriority(paths []string) []string {
 }
 
 // priorityScore computes a review priority (higher = more urgent).
-// Never-seen files get highest priority, then low confidence, then staleness boosts.
+// Never-seen files get highest priority, then low effective confidence, then staleness boosts.
+// Effective confidence blends self-rated confidence with repetition count — a "5" after 1 review
+// carries less weight than a "5" after 4+ reviews.
 func (s *State) priorityScore(path string) float64 {
 	fs := s.Files[path]
 
@@ -387,15 +468,16 @@ func (s *State) priorityScore(path string) float64 {
 		return 100
 	}
 
-	// Base: inverse confidence (conf 1 = 50, conf 5 = 10)
-	score := float64(6-fs.Confidence) * 10
+	// Base: inverse effective confidence (effConf near 0 = ~60, effConf 5 = 10)
+	effConf := s.EffectiveConfidence(path)
+	score := (6.0 - effConf) * 10
 
 	// Staleness boost: days since last review, scaled by confidence
 	// High confidence items get bigger staleness boost (they're the ones hiding at the bottom)
 	if !fs.LastReviewed.IsZero() {
 		days := time.Since(fs.LastReviewed).Hours() / 24
 		// Confidence 5 stale 30 days: +15 boost. Confidence 1 stale 30 days: +3 boost.
-		staleBoost := days * float64(fs.Confidence) * 0.1
+		staleBoost := days * effConf * 0.1
 		if staleBoost > 30 {
 			staleBoost = 30
 		}
@@ -762,6 +844,28 @@ func (s *State) CheckAchievements(ctx AchievementContext) []string {
 	}
 	if hour >= 5 && hour < 7 {
 		tryUnlock(AchEarlyBird)
+	}
+
+	// Challenge
+	if s.TotalChallenges >= 1 {
+		tryUnlock(AchChallengeFirst)
+	}
+	if s.TotalChallenges >= 10 {
+		tryUnlock(AchChallenge10)
+	}
+	if ctx.IsChallenge && ctx.ChallengeScore >= 100 {
+		tryUnlock(AchPerfect100)
+	}
+
+	// Mastery
+	if ctx.AppliedAuditFix {
+		tryUnlock(AchAuditFix)
+	}
+	if s.NotesBanked >= 5 {
+		tryUnlock(AchNoteTaker)
+	}
+	if ctx.SessionTotal >= 50 {
+		tryUnlock(AchBigSession)
 	}
 
 	return unlocked

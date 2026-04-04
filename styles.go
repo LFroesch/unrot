@@ -40,6 +40,10 @@ var (
 			Foreground(colorPrimary).
 			Bold(true)
 
+	totalStyle = lipgloss.NewStyle().
+			Foreground(colorWarn).
+			Bold(true)
+
 	wrongStyle = lipgloss.NewStyle().
 			Foreground(colorError).
 			Bold(true)
@@ -126,6 +130,11 @@ var (
 			Background(lipgloss.Color("235")).
 			Inline(true)
 
+	headerPurpleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("201")).
+				Background(lipgloss.Color("235")).
+				Inline(true)
+
 	headerAccentStyle = lipgloss.NewStyle().
 				Foreground(colorAccent).
 				Background(lipgloss.Color("235")).
@@ -134,7 +143,6 @@ var (
 	headerWarnStyle = lipgloss.NewStyle().
 			Foreground(colorWarn).
 			Background(lipgloss.Color("235")).
-			Italic(true).
 			Inline(true)
 
 	headerStreakStyle = lipgloss.NewStyle().

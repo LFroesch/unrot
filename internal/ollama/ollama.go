@@ -2,6 +2,7 @@ package ollama
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,6 +72,9 @@ const (
 	TypeOrdering
 	TypeCodeOutput
 	TypeDebug
+	TypeDecision
+	TypeArchitecture
+	TypeRefactor
 )
 
 func (t QuestionType) String() string {
@@ -93,6 +97,12 @@ func (t QuestionType) String() string {
 		return "code-output"
 	case TypeDebug:
 		return "debug"
+	case TypeDecision:
+		return "decision"
+	case TypeArchitecture:
+		return "architecture"
+	case TypeRefactor:
+		return "refactor"
 	default:
 		return "flashcard"
 	}
@@ -151,12 +161,13 @@ type Message struct {
 }
 
 // AllTypes returns the full set of question types for random selection.
-var AllTypes = []QuestionType{TypeFlashcard, TypeExplain, TypeFillBlank, TypeFinishCode, TypeMultiChoice, TypeCompare, TypeScenario, TypeOrdering, TypeCodeOutput, TypeDebug}
+var AllTypes = []QuestionType{TypeFlashcard, TypeExplain, TypeFillBlank, TypeFinishCode, TypeMultiChoice, TypeCompare, TypeScenario, TypeOrdering, TypeCodeOutput, TypeDebug, TypeDecision, TypeArchitecture, TypeRefactor}
 
 // Challenge represents a standalone coding challenge (not tied to a knowledge file).
 type Challenge struct {
 	Title       string
 	Description string
+	Concept     string // brief knowledge section shown below the problem
 	Language    string
 	Difficulty  Difficulty
 }
@@ -170,7 +181,7 @@ type ChallengeGrade struct {
 }
 
 // GenerateQuestion generates a question of the given type. If qtype is -1, picks randomly.
-func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, diff Difficulty) (*Question, error) {
+func (c *Client) GenerateQuestion(ctx context.Context, content, filename string, qtype QuestionType, diff Difficulty) (*Question, error) {
 	if qtype < 0 {
 		qtype = AllTypes[rand.Intn(len(AllTypes))]
 	}
@@ -178,7 +189,7 @@ func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, 
 	system := promptFor(qtype, diff)
 	user := fmt.Sprintf("Document: %s\n\n%s", filename, content)
 
-	resp, err := c.Chat(system, user)
+	resp, err := c.Chat(ctx, system, user)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +206,7 @@ func (c *Client) GenerateQuestion(content, filename string, qtype QuestionType, 
 // chatHistory contains the clarification conversation for context.
 // If existingFiles is non-nil, ollama suggests placement (domain/slug) based on existing structure.
 // Returns content, suggested domain, suggested slug.
-func (c *Client) GenerateKnowledge(topic string, chatHistory []Message, existingFiles []string) (content, domain, slug string, err error) {
+func (c *Client) GenerateKnowledge(ctx context.Context, topic string, chatHistory []Message, existingFiles []string) (content, domain, slug string, err error) {
 	var placementInstr string
 	if len(existingFiles) > 0 {
 		var fileList strings.Builder
@@ -253,7 +264,7 @@ Rules:
 	msgs = append(msgs, chatHistory...)
 	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Now generate the knowledge document for: %s", topic)})
 
-	resp, err2 := c.ChatWithHistory(system, msgs)
+	resp, err2 := c.ChatWithHistory(ctx, system, msgs)
 	if err2 != nil {
 		return "", "", "", err2
 	}
@@ -279,7 +290,7 @@ Rules:
 
 // UpdateKnowledge takes the clarification chat history, existing file content,
 // and returns a merged/updated knowledge document.
-func (c *Client) UpdateKnowledge(topic string, chatHistory []Message, existingContent string) (string, error) {
+func (c *Client) UpdateKnowledge(ctx context.Context, topic string, chatHistory []Message, existingContent string) (string, error) {
 	system := `You are a knowledge base writer updating an existing study document for a software developer.
 The preceding conversation shows what the user wants to add or change. Use that context to understand their intent.
 
@@ -301,7 +312,7 @@ Rules:
 	msgs = append(msgs, chatHistory...)
 	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Now update this existing document with what we discussed.\n\nExisting document:\n%s", existingContent)})
 
-	return c.ChatWithHistory(system, msgs)
+	return c.ChatWithHistory(ctx, system, msgs)
 }
 
 func difficultyClause(d Difficulty) string {
@@ -574,6 +585,54 @@ func increment(counter *int) {
 A: The early return skips mu.Unlock(), causing a permanent deadlock. Fix: use defer mu.Unlock() right after Lock().
 E: This is the classic "forgot to unlock" bug. When counter > 100, the function returns but the mutex stays locked — every future call to increment blocks forever. defer mu.Unlock() guarantees the unlock runs no matter how the function exits (return, panic, etc.).`, dc, ec)
 
+	case TypeDecision:
+		return fmt.Sprintf(`Generate ONE design decision question from the document below.
+%s
+
+Ask WHY a particular design choice was made — why this approach over alternatives. Focus on trade-offs, constraints, and reasoning. Great for interview prep: "Tell me why you chose X."
+
+Output EXACTLY this format (3 lines, no other text):
+Q: <question about a design decision or choice>
+A: <justification in 2-4 sentences covering trade-offs and reasoning>
+%s
+
+Example:
+Q: Why does this system use confidence-based scheduling instead of SM-2 spaced repetition?
+A: SM-2 computes the next review date algorithmically, but users felt disconnected from the scheduling. Confidence-based puts the user in control — they rate how well they know it, and the system prioritizes low-confidence items. The trade-off is less optimal spacing, but higher engagement because users trust their own ratings.
+E: SM-2 (SuperMemo 2) calculates intervals using ease factors and repetition counts. It's mathematically optimal but opaque. Confidence-based is simpler: the user says "I know this" (5) or "I'm shaky" (2), and the system sorts by that. The insight is that engagement matters more than optimal spacing for most learners.`, dc, ec)
+
+	case TypeArchitecture:
+		return fmt.Sprintf(`Generate ONE architecture trace question from the document below.
+%s
+
+Ask the user to trace a data flow, request path, or event chain through the system. "What happens when X?" or "Trace the path from A to B." Tests understanding of how components connect.
+
+Output EXACTLY this format (3 lines, no other text):
+Q: <question asking to trace a flow or path through the system>
+A: <step-by-step trace in 3-6 steps>
+%s
+
+Example:
+Q: Trace what happens from when the user presses 'r' on the dashboard to the first question appearing on screen.
+A: 1) handleDashboard receives 'r', calls startReview(). 2) startReview sorts files by priority, inserts prereqs, interleaves domains. 3) resetSession clears counters, sets phase to phaseQuiz. 4) startFile loads the knowledge file via loadLesson cmd. 5) lessonMsg arrives, sets sourceContent and quizStep to stepLesson.
+E: This is a classic event-driven flow in the Elm architecture (Model-View-Update). The key insight is that pressing a key doesn't directly show a question — it triggers a chain of commands and messages. The lesson (teach-first) always comes before the question.`, dc, ec)
+
+	case TypeRefactor:
+		return fmt.Sprintf(`Generate ONE refactoring question from the document below.
+%s
+
+Ask how the user would improve, extract, or restructure part of the system. Focus on concrete refactoring moves — not vague "make it better." Tests ability to think about code organization and design.
+
+Output EXACTLY this format (3 lines, no other text):
+Q: <question about a specific refactoring opportunity>
+A: <concrete refactoring approach in 2-4 sentences>
+%s
+
+Example:
+Q: How would you extract the grading logic (correct/wrong determination + confidence update + XP award) into its own package?
+A: Create an internal/grading package with a GradeResult struct holding verdict, feedback, XP delta, and new confidence. Move the grading decision logic from update.go into a pure function Grade(answer, correct, qtype) → GradeResult. Keep the state mutation (writing confidence to state.json) in update.go — the grading package computes, the caller persists.
+E: The key principle is separating computation from side effects. The grading logic is currently mixed with UI state updates in update.go. Extracting it makes the grading testable in isolation and reusable across quiz, challenge, and future interview modes.`, dc, ec)
+
 	default: // flashcard
 		return fmt.Sprintf(`Generate ONE flashcard question from the document below.
 %s
@@ -598,23 +657,23 @@ E: When main() returns, the Go runtime tears down everything — no cleanup, no 
 }
 
 // ChatWithHistory sends a system prompt + conversation history and returns the response.
-func (c *Client) ChatWithHistory(system string, history []Message) (string, error) {
+func (c *Client) ChatWithHistory(ctx context.Context, system string, history []Message) (string, error) {
 	msgs := []message{{Role: "system", Content: system}}
 	for _, h := range history {
 		msgs = append(msgs, message{Role: h.Role, Content: h.Content})
 	}
-	return c.chatMulti(msgs)
+	return c.chatMulti(ctx, msgs)
 }
 
 // Chat sends a simple system+user message pair and returns the response.
-func (c *Client) Chat(system, user string) (string, error) {
-	return c.chatMulti([]message{
+func (c *Client) Chat(ctx context.Context, system, user string) (string, error) {
+	return c.chatMulti(ctx, []message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	})
 }
 
-func (c *Client) chatMulti(messages []message) (string, error) {
+func (c *Client) chatMulti(ctx context.Context, messages []message) (string, error) {
 	c.sem <- struct{}{}
 	defer func() { <-c.sem }()
 
@@ -629,7 +688,12 @@ func (c *Client) chatMulti(messages []message) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.Post(c.host+"/api/chat", "application/json", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.host+"/api/chat", bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("ollama request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("ollama request failed: %w", err)
 	}
@@ -815,7 +879,7 @@ func parseMultiChoice(text string) (*Question, error) {
 }
 
 // GenerateChallenge creates a standalone coding challenge (not tied to a knowledge file).
-func (c *Client) GenerateChallenge(domain string, diff Difficulty) (*Challenge, error) {
+func (c *Client) GenerateChallenge(ctx context.Context, domain string, diff Difficulty) (*Challenge, error) {
 	domainCtx := "any programming language (vary between Go, Python, JavaScript, Rust)"
 	if domain != "" {
 		domainCtx = fmt.Sprintf("focused on %s", domain)
@@ -839,6 +903,8 @@ LANG: <language name>
 <clear problem description>
 <include input/output examples where helpful>
 <state any constraints or requirements>
+===
+<2-8 sentences of relevant syntax or concept knowledge — key functions, idioms, or patterns the solver should know. Not the answer, just enough context to jog memory.>
 
 Rules:
 - Problems should be solvable in 5-30 lines of code
@@ -847,7 +913,7 @@ Rules:
 - Do NOT wrap the entire output in markdown code fences
 - Code examples within the description should use plain text (no backticks)`, domainCtx, difficultyClause(diff))
 
-	resp, err := c.Chat(system, "Generate a challenge.")
+	resp, err := c.Chat(ctx, system, "Generate a challenge.")
 	if err != nil {
 		return nil, err
 	}
@@ -855,7 +921,7 @@ Rules:
 }
 
 // GenerateChallengeFromChat creates a challenge based on a conversational topic clarification.
-func (c *Client) GenerateChallengeFromChat(topic string, history []Message, diff Difficulty) (*Challenge, error) {
+func (c *Client) GenerateChallengeFromChat(ctx context.Context, topic string, history []Message, diff Difficulty) (*Challenge, error) {
 	system := fmt.Sprintf(`You are a coding challenge generator for a developer practice tool.
 Based on the conversation below, generate ONE standalone coding challenge tailored to what the user wants to practice.
 %s
@@ -874,8 +940,11 @@ LANG: <language name>
 <clear problem description>
 <include input/output examples where helpful>
 <state any constraints or requirements>
+===
+<2-8 sentences of relevant syntax or concept knowledge — key functions, idioms, or patterns the solver should know. Not the answer, just enough context to jog memory.>
 
 Rules:
+- All information needed to solve the answer should be in the problem output, not to give it away, but you shouldn't *NEED* to talk to the chat or look things up to solve it if you just read the problem well enough. Even examples of things that AREN'T the answer to help demonstrate syntax etc are fine.
 - Problems should be solvable in 5-30 lines of code
 - Be specific — include concrete examples with expected input/output
 - For algorithm problems, state expected time/space complexity
@@ -889,7 +958,7 @@ Rules:
 	}
 	msgs = append(msgs, Message{Role: "user", Content: "Generate the challenge now."})
 
-	resp, err := c.ChatWithHistory(system, msgs)
+	resp, err := c.ChatWithHistory(ctx, system, msgs)
 	if err != nil {
 		return nil, err
 	}
@@ -904,7 +973,7 @@ type AnswerGrade struct {
 
 // GradeFinishCode evaluates a code-completion answer against the expected line.
 // snippet is the full code context (with // ??? placeholder), expectedLine is the model answer.
-func (c *Client) GradeFinishCode(snippet, expectedLine, userAnswer string) (*AnswerGrade, error) {
+func (c *Client) GradeFinishCode(ctx context.Context, snippet, expectedLine, userAnswer string) (*AnswerGrade, error) {
 	system := fmt.Sprintf(`You are grading a code-completion quiz question.
 
 The code snippet (shown to the user with // ??? as the blank):
@@ -930,7 +999,7 @@ CRITICAL: Never reveal the model answer, never say "the answer is", never quote 
 
 	user := fmt.Sprintf("User's code: %s", userAnswer)
 
-	resp, err := c.Chat(system, user)
+	resp, err := c.Chat(ctx, system, user)
 	if err != nil {
 		return nil, err
 	}
@@ -938,28 +1007,23 @@ CRITICAL: Never reveal the model answer, never say "the answer is", never quote 
 }
 
 // GradeAnswer evaluates a typed answer against the correct answer.
-func (c *Client) GradeAnswer(question, correctAnswer, userAnswer string) (*AnswerGrade, error) {
-	system := fmt.Sprintf(`You are grading a quiz answer.
+func (c *Client) GradeAnswer(ctx context.Context, question, correctAnswer, userAnswer string) (*AnswerGrade, error) {
+	system := fmt.Sprintf(`You are grading a quiz answer. The correct answer is: %s
 
-The correct answer (INTERNAL — NEVER quote, paraphrase, or give this away in your feedback):
-%s
+Rules:
+- If the user's answer matches the correct answer (exactly or close enough), mark CORRECT: yes. Do not overthink this.
+- Accept substantially equivalent answers even if worded differently.
+- Be lenient on completeness, strict on factual accuracy.
+- If wrong: do NOT reveal the correct answer in feedback. Point at what's off and guide them toward the right concept.
 
-Focus on whether the user demonstrates understanding of the key concept — don't require exact wording.
-Accept answers that are substantially correct even if phrased differently.
-Be strict about factual accuracy but lenient about completeness.
-
-Output EXACTLY this format:
+Output EXACTLY:
 CORRECT: <yes/no>
 ---
-<2-3 sentences of educational feedback:
-- If CORRECT: explain WHY their answer is right — what concept they demonstrated, what makes it work. Reinforce the learning.
-- If WRONG: describe what's off about THEIR reasoning — what they confused, overlooked, or mixed up. Do NOT name the correct answer, do NOT say "the answer is..." or "you should have said...". Instead, ask a guiding question or point them toward the right concept area so they can figure it out themselves.>
-
-CRITICAL: Your feedback must NEVER contain the correct answer, a synonym of it, or a rephrasing. The user will retry — giving it away defeats the purpose.`, correctAnswer)
+<2-3 sentences: if correct, reinforce why it's right; if wrong, explain what's off without naming the answer>`, correctAnswer)
 
 	user := fmt.Sprintf("Question: %s\n\nUser's answer: %s", question, userAnswer)
 
-	resp, err := c.Chat(system, user)
+	resp, err := c.Chat(ctx, system, user)
 	if err != nil {
 		return nil, err
 	}
@@ -991,26 +1055,33 @@ func parseAnswerGrade(text string) (*AnswerGrade, error) {
 }
 
 // GradeChallenge evaluates a user's code submission against a challenge.
-func (c *Client) GradeChallenge(challenge *Challenge, code string) (*ChallengeGrade, error) {
-	system := `You are grading a coding challenge submission. You cannot execute the code — evaluate by reading.
+func (c *Client) GradeChallenge(ctx context.Context, challenge *Challenge, code string) (*ChallengeGrade, error) {
+	system := `You are grading a coding challenge submission. You cannot execute the code — evaluate by reading carefully.
 
-Evaluate:
-1. Correctness: Would this code produce the right result for all inputs? Check edge cases.
-2. Efficiency: Is the approach optimal? What's the time/space complexity?
-3. Code quality: Is it clean, idiomatic, well-structured?
+Score on these dimensions:
+- Correctness (50pts): Does it handle typical inputs? Does it handle edge cases (null, empty, overflow, negatives)?
+- Efficiency (30pts): Is the approach optimal or is there obvious waste?
+- Code quality (20pts): Is it clean, readable, idiomatic for the language?
 
-CRITICAL: Do NOT reveal the correct solution or full answer in your feedback. Point out what's wrong or could break, give directional hints, but never show the fix or correct code. The user should figure it out themselves.
+CORRECT: yes = clearly correct for all typical inputs. no = wrong logic or definitely broken.
+
+Feedback rules:
+- Be specific about WHAT is wrong (not just "this could fail")
+- Name the specific input or condition that would break it
+- If wrong: explain what the code does vs what it should do, then give a directional hint — do NOT give the solution
+- If correct but improvable: say what's good, then point out the one most impactful improvement
+- 3-6 sentences, direct and technical
 
 Output EXACTLY this format:
 SCORE: <0-100>
 CORRECT: <yes/no>
 EFFICIENCY: <optimal/acceptable/suboptimal>
 ---
-<2-5 sentences of specific feedback: what's right, what could break, directional hints for improvement. Never show corrected code or the full solution.>`
+<feedback>`
 
 	user := fmt.Sprintf("Challenge: %s\n\n%s\n\nSubmitted code:\n%s", challenge.Title, challenge.Description, code)
 
-	resp, err := c.Chat(system, user)
+	resp, err := c.Chat(ctx, system, user)
 	if err != nil {
 		return nil, err
 	}
@@ -1037,7 +1108,20 @@ func parseChallenge(text string, diff Difficulty) (*Challenge, error) {
 	}
 
 	if descStart >= 0 && descStart < len(lines) {
-		ch.Description = strings.TrimSpace(strings.Join(lines[descStart:], "\n"))
+		body := lines[descStart:]
+		conceptStart := -1
+		for i, line := range body {
+			if strings.TrimSpace(line) == "===" {
+				conceptStart = i
+				break
+			}
+		}
+		if conceptStart >= 0 {
+			ch.Description = strings.TrimSpace(strings.Join(body[:conceptStart], "\n"))
+			ch.Concept = strings.TrimSpace(strings.Join(body[conceptStart+1:], "\n"))
+		} else {
+			ch.Description = strings.TrimSpace(strings.Join(body, "\n"))
+		}
 	} else if ch.Title != "" {
 		// No --- separator — everything after LANG line is description
 		for i, line := range lines {
@@ -1090,4 +1174,135 @@ func parseChallengeGrade(text string) (*ChallengeGrade, error) {
 		return nil, fmt.Errorf("failed to parse challenge grade from ollama response:\n%s", text)
 	}
 	return grade, nil
+}
+
+// EnrichFile analyzes a knowledge file and returns its difficulty tier and suggested prerequisites.
+// difficulty is "easy", "medium", or "hard" relative to other topics in the same domain.
+// connections are "domain/slug" references from the index that this file genuinely depends on.
+func (c *Client) EnrichFile(ctx context.Context, fileContent, indexContent, domain, slug string) (difficulty string, connections []string, err error) {
+	system := `You are a knowledge graph assistant. Analyze the given knowledge file and respond with:
+1. A difficulty rating relative to other topics in the same domain:
+   - easy: fundamentals, definitions, basic syntax — what you need to know first
+   - medium: applying concepts, patterns, comparisons
+   - hard: edge cases, advanced patterns, gotchas, deep internals
+2. Any genuine prerequisites from the knowledge index — only files the reader must understand first.
+
+Respond in EXACTLY this format, nothing else:
+difficulty: <easy|medium|hard>
+requires: domain/slug
+requires: domain/slug
+
+If no prerequisites, just output the difficulty line.`
+
+	user := fmt.Sprintf("Domain: %s\nFile: %s\n\n--- FILE CONTENT ---\n%s\n\n--- KNOWLEDGE INDEX (domain → slug — description) ---\n%s",
+		domain, slug, fileContent, indexContent)
+
+	resp, err := c.Chat(ctx, system, user)
+	if err != nil {
+		return "medium", nil, err
+	}
+
+	difficulty = "medium"
+	for _, line := range strings.Split(resp, "\n") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "difficulty:"); ok {
+			d := strings.TrimSpace(after)
+			if d == "easy" || d == "medium" || d == "hard" {
+				difficulty = d
+			}
+		} else if after, ok := strings.CutPrefix(line, "requires:"); ok {
+			ref := strings.TrimSpace(after)
+			// Skip self-reference
+			if ref != "" && ref != domain+"/"+slug {
+				connections = append(connections, ref)
+			}
+		}
+	}
+	return difficulty, connections, nil
+}
+
+// ProposeSubsystems asks ollama to suggest subsystems to document for a project.
+// archContext is the project's CLAUDE.md/README content.
+func (c *Client) ProposeSubsystems(ctx context.Context, archContext string) ([]string, error) {
+	system := `You are analyzing a software project to propose subsystems worth documenting.
+Each subsystem is a logical grouping of functionality (e.g. "quiz-flow", "xp-system", "ollama-integration").
+
+Rules:
+- Propose 5-15 subsystems, ordered by importance
+- Each line: slug — one-sentence description
+- Slug format: lowercase-hyphenated (e.g. "quiz-flow", "state-management")
+- Focus on things a developer would forget after a few weeks away
+- Group by logical concern, not by file
+
+Output format (one per line, nothing else):
+slug — description`
+
+	resp, err := c.Chat(ctx, system, "Project architecture:\n\n"+archContext)
+	if err != nil {
+		return nil, err
+	}
+
+	var subsystems []string
+	for _, line := range strings.Split(resp, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		subsystems = append(subsystems, line)
+	}
+	return subsystems, nil
+}
+
+// GenerateProjectKnowledge creates a knowledge doc for a project subsystem.
+// archContext is CLAUDE.md/README, sourceCode is the relevant truncated source files,
+// chatHistory has any clarification conversation.
+func (c *Client) GenerateProjectKnowledge(ctx context.Context, projectName, subsystem, archContext, sourceCode string, chatHistory []Message) (string, error) {
+	system := fmt.Sprintf(`You are documenting the "%s" subsystem of the "%s" project for the developer who built it.
+The goal is to fight "I forgot how my own code works" decay. Write as if explaining to yourself in 3 months.
+
+You have:
+1. Architecture context (CLAUDE.md/README) — the big picture
+2. Source code for this subsystem — the implementation details
+3. Any conversation clarifying what to focus on
+
+Rules:
+- Start with: # %s — %s
+- Focus on HOW it works and WHY it was built this way
+- Include key data structures, state transitions, and control flow
+- Call out non-obvious decisions and gotchas
+- Use these sections:
+
+## Overview
+1-3 sentences: what this subsystem does and why it exists
+
+## How It Works
+- Step-by-step mechanism, data flow, key functions
+- Include code references (function names, file:line patterns)
+- Show key data structures inline
+
+## Design Decisions
+- Why this approach? What alternatives were considered?
+- Trade-offs accepted
+
+## Gotchas
+- Things that would trip you up coming back to this code
+- Edge cases, implicit assumptions, ordering dependencies
+
+## Connections
+- requires: domain/slug (prerequisites from other knowledge files)
+- How this subsystem interacts with others
+
+- Keep it 40-80 lines — dense, specific, quizzable
+- NO markdown code fences wrapping the whole document
+- Every fact should be something worth quizzing on`, subsystem, projectName, projectName, subsystem)
+
+	msgs := make([]Message, 0, len(chatHistory)+2)
+	if archContext != "" {
+		msgs = append(msgs, Message{Role: "user", Content: "Architecture context:\n\n" + archContext})
+		msgs = append(msgs, Message{Role: "assistant", Content: "Got it. I have the project architecture context."})
+	}
+	msgs = append(msgs, chatHistory...)
+	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Source code for %s subsystem:\n\n%s\n\nNow generate the knowledge document.", subsystem, sourceCode)})
+
+	return c.ChatWithHistory(ctx, system, msgs)
 }

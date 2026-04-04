@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,7 +56,7 @@ type lessonMsg struct {
 
 type conceptChatMsg struct {
 	text       string
-	durationMs int64
+	durationSec float64
 }
 
 type learnChatMsg struct {
@@ -62,6 +64,12 @@ type learnChatMsg struct {
 }
 
 type bankNotesMsg struct{ notes string }
+
+// enrichDoneMsg fires after a single file has been enriched.
+type enrichDoneMsg struct {
+	relPath string
+	err     error
+}
 
 type reportSavedMsg struct{ path string }
 
@@ -85,9 +93,11 @@ type auditFixMsg struct{ content string }
 
 type challengeChatMsg struct{ text string }
 
-type challengeExplainMsg struct{ text string }
-
 type clipboardMsg struct{ ok bool }
+
+type projectSubsystemsMsg struct{ subsystems []string }
+type projectChatMsg struct{ text string }
+type projectContentMsg struct{ content string }
 
 type errMsg struct{ err error }
 
@@ -114,13 +124,13 @@ func loadState(brainPath string) tea.Cmd {
 	}
 }
 
-func generateQuestion(client *ollama.Client, brainPath, filePath string, qtype ollama.QuestionType, diff ollama.Difficulty) tea.Cmd {
+func generateQuestion(ctx context.Context, client *ollama.Client, brainPath, filePath string, qtype ollama.QuestionType, diff ollama.Difficulty) tea.Cmd {
 	return func() tea.Msg {
 		content, err := knowledge.ReadFile(brainPath, filePath)
 		if err != nil {
 			return errMsg{err}
 		}
-		q, err := client.GenerateQuestion(content, filePath, qtype, diff)
+		q, err := client.GenerateQuestion(ctx, content, filePath, qtype, diff)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -128,7 +138,7 @@ func generateQuestion(client *ollama.Client, brainPath, filePath string, qtype o
 	}
 }
 
-func explainMoreCmd(client *ollama.Client, question, answer, explanation, source string) tea.Cmd {
+func explainMoreCmd(ctx context.Context, client *ollama.Client, question, answer, explanation, source string) tea.Cmd {
 	return func() tea.Msg {
 		system := `You are a tutor helping someone actually learn a concept from a quiz.
 Rules:
@@ -145,39 +155,11 @@ Rules:
 		}
 		user += "\n\nTeach me this concept. Include a concrete example."
 
-		resp, err := client.Chat(system, user)
+		resp, err := client.Chat(ctx, system, user)
 		if err != nil {
 			return errMsg{err}
 		}
 		return explainMoreMsg{text: resp}
-	}
-}
-
-func challengeExplainCmd(client *ollama.Client, challenge *ollama.Challenge, grade *ollama.ChallengeGrade, code string) tea.Cmd {
-	return func() tea.Msg {
-		system := `You are a tutor explaining a coding challenge.
-Rules:
-- Start with the core concept being tested in one sentence
-- Explain WHY the right approach works — the underlying mechanism
-- Mention key edge cases or gotchas the user should think about
-- Give directional hints: what pattern to use, what to watch out for
-- Do NOT show the full correct solution or complete code — the user should write it themselves
-- You may show small snippets (1-2 lines) to illustrate a specific concept, but never the full answer
-- Keep it to 6-10 sentences total
-- Use markdown: **bold** key terms, fenced code blocks for snippets, bullet lists
-- Every fact must be correct`
-
-		user := fmt.Sprintf("Challenge: %s\n%s\n\nSubmitted code:\n%s", challenge.Title, challenge.Description, code)
-		if grade != nil && grade.Feedback != "" {
-			user += fmt.Sprintf("\n\nGrade feedback: %s", grade.Feedback)
-		}
-		user += "\n\nTeach me the concept and guide me toward the right approach without showing the full solution."
-
-		resp, err := client.Chat(system, user)
-		if err != nil {
-			return errMsg{err}
-		}
-		return challengeExplainMsg{text: resp}
 	}
 }
 
@@ -216,14 +198,18 @@ func copyToClipboardCmd(text string) tea.Cmd {
 	}
 }
 
-func gradeAnswerCmd(client *ollama.Client, qType ollama.QuestionType, question, correctAnswer, userAnswer string) tea.Cmd {
+func gradeAnswerCmd(ctx context.Context, client *ollama.Client, qType ollama.QuestionType, question, correctAnswer, userAnswer string) tea.Cmd {
 	return func() tea.Msg {
+		// Short-circuit exact match — LLM should never fail this.
+		if strings.EqualFold(strings.TrimSpace(userAnswer), strings.TrimSpace(correctAnswer)) {
+			return answerGradeMsg{correct: true, feedback: "Correct!"}
+		}
 		var grade *ollama.AnswerGrade
 		var err error
 		if qType == ollama.TypeFinishCode {
-			grade, err = client.GradeFinishCode(question, correctAnswer, userAnswer)
+			grade, err = client.GradeFinishCode(ctx, question, correctAnswer, userAnswer)
 		} else {
-			grade, err = client.GradeAnswer(question, correctAnswer, userAnswer)
+			grade, err = client.GradeAnswer(ctx, question, correctAnswer, userAnswer)
 		}
 		if err != nil {
 			return errMsg{err}
@@ -232,7 +218,7 @@ func gradeAnswerCmd(client *ollama.Client, qType ollama.QuestionType, question, 
 	}
 }
 
-func hintCmd(client *ollama.Client, question, answer string, prevHints []string) tea.Cmd {
+func hintCmd(ctx context.Context, client *ollama.Client, question, answer string, prevHints []string) tea.Cmd {
 	return func() tea.Msg {
 		n := len(prevHints)
 		var level string
@@ -256,7 +242,7 @@ Rules:
 			user += fmt.Sprintf("\n\nPrevious hints:\n%s", strings.Join(prevHints, "\n"))
 		}
 
-		resp, err := client.Chat(system, user)
+		resp, err := client.Chat(ctx, system, user)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -264,7 +250,39 @@ Rules:
 	}
 }
 
-func learnClarifyCmd(client *ollama.Client, topic string, history []chatEntry, existingFiles []string) tea.Cmd {
+func challengeHintCmd(ctx context.Context, client *ollama.Client, problem string, prevHints []string) tea.Cmd {
+	return func() tea.Msg {
+		n := len(prevHints)
+		var level string
+		switch {
+		case n == 0:
+			level = "Hint 1: Name the general technique or approach needed. One sentence."
+		case n == 1:
+			level = "Hint 2: Mention a specific function, method, or language feature that would help. One sentence."
+		default:
+			level = "Hint 3: Describe the key step or algorithm without giving the full solution. One sentence."
+		}
+
+		system := fmt.Sprintf(`You give hints for a coding challenge. Do NOT reveal the solution.
+Rules:
+- Output ONLY the hint text, no labels, no "Hint:", no formatting
+- One sentence only
+- %s`, level)
+
+		user := fmt.Sprintf("Challenge: %s", problem)
+		if n > 0 {
+			user += fmt.Sprintf("\n\nPrevious hints:\n%s", strings.Join(prevHints, "\n"))
+		}
+
+		resp, err := client.Chat(ctx, system, user)
+		if err != nil {
+			return errMsg{err}
+		}
+		return hintMsg{text: resp}
+	}
+}
+
+func learnClarifyCmd(ctx context.Context, client *ollama.Client, topic string, history []chatEntry, existingFiles []string) tea.Cmd {
 	return func() tea.Msg {
 		var updateNote string
 		if len(existingFiles) > 0 {
@@ -284,7 +302,7 @@ Given their topic and any conversation so far, ask 1-2 clarifying questions to u
 
 Rules:
 - Keep it conversational — 2-3 sentences max
-- If you already have enough context from the conversation, say: "I have a good picture. Press g to generate your knowledge doc."
+- If you already have enough context from the conversation, say: "I have a good picture. Press ctrl+g to generate your knowledge doc."
 - Don't repeat questions they already answered%s`, updateNote)
 
 		msgs := make([]ollama.Message, 0, len(history)+1)
@@ -293,7 +311,7 @@ Rules:
 			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
 		}
 
-		resp, err := client.ChatWithHistory(system, msgs)
+		resp, err := client.ChatWithHistory(ctx, system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -301,7 +319,7 @@ Rules:
 	}
 }
 
-func generateKnowledgeFromChat(client *ollama.Client, topic string, chatHistory []chatEntry, existingFiles []string, brainPath string, updateFile string) tea.Cmd {
+func generateKnowledgeFromChat(ctx context.Context, client *ollama.Client, topic string, chatHistory []chatEntry, existingFiles []string, brainPath string, updateFile string) tea.Cmd {
 	return func() tea.Msg {
 		msgs := make([]ollama.Message, 0, len(chatHistory)+1)
 		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to learn about: %s", topic)})
@@ -314,7 +332,7 @@ func generateKnowledgeFromChat(client *ollama.Client, topic string, chatHistory 
 			if err != nil {
 				return errMsg{err}
 			}
-			content, err := client.UpdateKnowledge(topic, msgs, existing)
+			content, err := client.UpdateKnowledge(ctx, topic, msgs, existing)
 			if err != nil {
 				return errMsg{err}
 			}
@@ -324,7 +342,7 @@ func generateKnowledgeFromChat(client *ollama.Client, topic string, chatHistory 
 			return learnContentMsg{content: content, domain: domain, slug: slug}
 		}
 
-		content, domain, slug, err := client.GenerateKnowledge(topic, msgs, existingFiles)
+		content, domain, slug, err := client.GenerateKnowledge(ctx, topic, msgs, existingFiles)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -342,9 +360,9 @@ func loadLesson(brainPath, filePath string) tea.Cmd {
 	}
 }
 
-func auditKnowledgeCmd(client *ollama.Client, content, filename string) tea.Cmd {
+func auditKnowledgeCmd(ctx context.Context, client *ollama.Client, content, filename string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := client.Chat(
+		resp, err := client.Chat(ctx,
 			`You are a knowledge file auditor for a developer's study notes. Your job is to catch things that would teach them something WRONG — not to suggest improvements or restructuring.
 
 Check for:
@@ -371,9 +389,9 @@ Output:
 	}
 }
 
-func auditFixCmd(client *ollama.Client, content, auditResult string) tea.Cmd {
+func auditFixCmd(ctx context.Context, client *ollama.Client, content, auditResult string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := client.Chat(
+		resp, err := client.Chat(ctx,
 			`You are fixing a knowledge file based on an audit. Apply ONLY the corrections the audit identified.
 
 Rules:
@@ -406,7 +424,7 @@ func saveAuditFixCmd(brainPath, relPath, content string) tea.Cmd {
 	}
 }
 
-func conceptChatCmd(client *ollama.Client, question, answer, source string, history []chatEntry) tea.Cmd {
+func conceptChatCmd(ctx context.Context, client *ollama.Client, question, answer, source string, history []chatEntry) tea.Cmd {
 	return func() tea.Msg {
 		var system string
 		if question != "" {
@@ -423,6 +441,7 @@ Correct answer: %s`, question, answer)
 		system += `
 
 Be a helpful tutor:
+- NEVER give away the full answer. You can give code examples, but using different data, or not the full answer.
 - Follow the user's lead — if they ask for a different format, tone, or to skip examples, adapt immediately and keep that change for the rest of the conversation
 - Never repeat examples or code blocks from your earlier messages; reference them by description if needed
 - When the user seems confused, try a completely different angle: analogy, step-by-step trace, or compare/contrast
@@ -434,11 +453,11 @@ Be a helpful tutor:
 			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
 		}
 		start := time.Now()
-		resp, err := client.ChatWithHistory(system, msgs)
+		resp, err := client.ChatWithHistory(ctx, system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
-		return conceptChatMsg{text: resp, durationMs: time.Since(start).Milliseconds()}
+		return conceptChatMsg{text: resp, durationSec: time.Since(start).Seconds()}
 	}
 }
 
@@ -452,7 +471,7 @@ func saveKnowledge(brainPath, domain, slug, content string) tea.Cmd {
 	}
 }
 
-func bankChatToNotesCmd(client *ollama.Client, chat []chatEntry, brainPath, relPath, existingContent string) tea.Cmd {
+func bankChatToNotesCmd(ctx context.Context, client *ollama.Client, chat []chatEntry, brainPath, relPath, existingContent string) tea.Cmd {
 	return func() tea.Msg {
 		var sb strings.Builder
 		for _, msg := range chat {
@@ -472,7 +491,7 @@ Rules:
 - Don't include greetings or meta-conversation`
 
 		user := fmt.Sprintf("Conversation:\n%s\n\nSummarize the key insights as study notes.", sb.String())
-		resp, err := client.Chat(system, user)
+		resp, err := client.Chat(ctx, system, user)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -547,7 +566,7 @@ func (m model) exportReportCmd() tea.Cmd {
 	}
 }
 
-func challengeClarifyCmd(client *ollama.Client, topic string, history []chatEntry) tea.Cmd {
+func challengeClarifyCmd(ctx context.Context, client *ollama.Client, topic string, history []chatEntry) tea.Cmd {
 	return func() tea.Msg {
 		system := `You are helping a developer choose what coding challenge to practice.
 Given their topic and any conversation so far, ask 1-2 clarifying questions to understand:
@@ -566,7 +585,7 @@ Rules:
 			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
 		}
 
-		resp, err := client.ChatWithHistory(system, msgs)
+		resp, err := client.ChatWithHistory(ctx, system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -574,13 +593,13 @@ Rules:
 	}
 }
 
-func generateChallengeFromChatCmd(client *ollama.Client, topic string, history []chatEntry, diff ollama.Difficulty) tea.Cmd {
+func generateChallengeFromChatCmd(ctx context.Context, client *ollama.Client, topic string, history []chatEntry, diff ollama.Difficulty) tea.Cmd {
 	return func() tea.Msg {
 		msgs := make([]ollama.Message, len(history))
 		for i, h := range history {
 			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
 		}
-		ch, err := client.GenerateChallengeFromChat(topic, msgs, diff)
+		ch, err := client.GenerateChallengeFromChat(ctx, topic, msgs, diff)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -588,9 +607,9 @@ func generateChallengeFromChatCmd(client *ollama.Client, topic string, history [
 	}
 }
 
-func generateChallengeCmd(client *ollama.Client, domain string, diff ollama.Difficulty) tea.Cmd {
+func generateChallengeCmd(ctx context.Context, client *ollama.Client, domain string, diff ollama.Difficulty) tea.Cmd {
 	return func() tea.Msg {
-		ch, err := client.GenerateChallenge(domain, diff)
+		ch, err := client.GenerateChallenge(ctx, domain, diff)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -598,12 +617,261 @@ func generateChallengeCmd(client *ollama.Client, domain string, diff ollama.Diff
 	}
 }
 
-func gradeChallengeCmd(client *ollama.Client, challenge *ollama.Challenge, code string) tea.Cmd {
+func gradeChallengeCmd(ctx context.Context, client *ollama.Client, challenge *ollama.Challenge, code string) tea.Cmd {
 	return func() tea.Msg {
-		grade, err := client.GradeChallenge(challenge, code)
+		grade, err := client.GradeChallenge(ctx, challenge, code)
 		if err != nil {
 			return errMsg{err}
 		}
 		return challengeGradeMsg{grade: grade}
 	}
+}
+
+// enrichFileCmd reads a knowledge file, calls ollama to tag difficulty + connections,
+// then writes the result back to the file's ## Connections section.
+func enrichFileCmd(ctx context.Context, client *ollama.Client, brainPath, indexContent, relPath string) tea.Cmd {
+	return func() tea.Msg {
+		content, err := knowledge.ReadFile(brainPath, relPath)
+		if err != nil {
+			return enrichDoneMsg{relPath: relPath, err: err}
+		}
+		dom := knowledge.Domain(relPath)
+		// slug = filename without extension
+		slug := strings.TrimSuffix(filepath.Base(relPath), ".md")
+		difficulty, connections, err := client.EnrichFile(ctx, content, indexContent, dom, slug)
+		if err != nil {
+			return enrichDoneMsg{relPath: relPath, err: err}
+		}
+		err = knowledge.UpdateConnections(brainPath, relPath, difficulty, connections)
+		return enrichDoneMsg{relPath: relPath, err: err}
+	}
+}
+
+// --- Project Scan Commands ---
+
+func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, archContext string) tea.Cmd {
+	return func() tea.Msg {
+		subs, err := client.ProposeSubsystems(ctx, archContext)
+		if err != nil {
+			return errMsg{err}
+		}
+		return projectSubsystemsMsg{subsystems: subs}
+	}
+}
+
+func projectClarifyCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext string, history []chatEntry) tea.Cmd {
+	return func() tea.Msg {
+		system := fmt.Sprintf(`You are helping a developer document the "%s" subsystem of their "%s" project.
+Ask 1-2 clarifying questions about what aspects to focus on:
+- Which files or functions matter most for this subsystem?
+- What non-obvious decisions should the doc capture?
+- Any gotchas they want to make sure are recorded?
+
+Rules:
+- Keep it conversational — 2-3 sentences max
+- If you already have enough context, say: "Got it. Press ctrl+g to generate the knowledge doc."
+- Don't repeat questions they already answered`, subsystem, projectName)
+
+		msgs := make([]ollama.Message, 0, len(history)+2)
+		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to document the %s subsystem.\n\nArchitecture context:\n%s", subsystem, archContext)})
+		for _, h := range history {
+			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
+		}
+
+		resp, err := client.ChatWithHistory(ctx, system, msgs)
+		if err != nil {
+			return errMsg{err}
+		}
+		return projectChatMsg{text: resp}
+	}
+}
+
+func generateProjectKnowledgeCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext, sourceCode string, history []chatEntry) tea.Cmd {
+	return func() tea.Msg {
+		msgs := make([]ollama.Message, len(history))
+		for i, h := range history {
+			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
+		}
+		content, err := client.GenerateProjectKnowledge(ctx, projectName, subsystem, archContext, sourceCode, msgs)
+		if err != nil {
+			return errMsg{err}
+		}
+		return projectContentMsg{content: content}
+	}
+}
+
+// readProjectContext reads CLAUDE.md and README.md from a repo directory.
+func readProjectContext(repoPath string) string {
+	var parts []string
+	for _, name := range []string{"CLAUDE.md", "README.md"} {
+		data, err := os.ReadFile(filepath.Join(repoPath, name))
+		if err == nil {
+			parts = append(parts, fmt.Sprintf("--- %s ---\n%s", name, string(data)))
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// getRepoHead returns the short HEAD commit hash for a git repo, or "" on error.
+func getRepoHead(repoPath string) string {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--short", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// readSubsystemFiles reads source files from a repo that are relevant to a subsystem.
+// It scores files by name match against the subsystem slug and any files mentioned in chat,
+// then returns their contents truncated to fit a reasonable context window (~6k lines total).
+// Returns (content, comma-separated file list).
+func readSubsystemFiles(repoPath, subsystem string, chatHistory []chatEntry) (string, string) {
+	// Collect file mentions from chat history
+	var chatMentions []string
+	for _, h := range chatHistory {
+		for _, word := range strings.Fields(h.content) {
+			// Look for things that look like filenames
+			if strings.Contains(word, ".") && !strings.HasPrefix(word, "http") {
+				clean := strings.Trim(word, ",.;:()\"'`")
+				chatMentions = append(chatMentions, strings.ToLower(clean))
+			}
+		}
+	}
+
+	// Scan repo for source files
+	var sourceFiles []string
+	sourceExts := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
+		".rs": true, ".java": true, ".c": true, ".h": true, ".cpp": true, ".rb": true,
+		".sh": true, ".sql": true, ".yaml": true, ".yml": true, ".toml": true,
+	}
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true, "__pycache__": true,
+		"dist": true, "build": true, ".next": true, "target": true,
+	}
+
+	filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := filepath.Ext(info.Name())
+		if sourceExts[ext] && info.Size() < 500_000 { // skip huge files
+			rel, _ := filepath.Rel(repoPath, path)
+			sourceFiles = append(sourceFiles, rel)
+		}
+		return nil
+	})
+
+	// Score each file for relevance
+	slugWords := strings.Split(strings.ReplaceAll(subsystem, "-", " "), " ")
+	type scored struct {
+		path  string
+		score int
+	}
+	var candidates []scored
+	for _, f := range sourceFiles {
+		s := 0
+		fl := strings.ToLower(f)
+		base := strings.ToLower(filepath.Base(f))
+
+		// Exact filename mention in chat = highest priority
+		for _, mention := range chatMentions {
+			if base == mention || fl == mention {
+				s += 100
+			}
+		}
+
+		// Subsystem slug word match against path
+		for _, w := range slugWords {
+			if len(w) < 2 {
+				continue
+			}
+			if strings.Contains(fl, w) {
+				s += 10
+			}
+		}
+
+		// Bonus for shorter paths (more central files)
+		depth := strings.Count(f, string(filepath.Separator))
+		if depth <= 1 {
+			s += 3
+		}
+
+		if s > 0 {
+			candidates = append(candidates, scored{f, s})
+		}
+	}
+
+	// Sort by score descending
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	// Read top files, truncated to ~6k lines total
+	const maxLines = 6000
+	const maxPerFile = 300
+	var b strings.Builder
+	totalLines := 0
+	filesRead := 0
+
+	for _, c := range candidates {
+		if totalLines >= maxLines || filesRead >= 10 {
+			break
+		}
+		data, err := os.ReadFile(filepath.Join(repoPath, c.path))
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		limit := maxPerFile
+		if len(lines) < limit {
+			limit = len(lines)
+		}
+		if totalLines+limit > maxLines {
+			limit = maxLines - totalLines
+		}
+		truncated := ""
+		if len(lines) > limit {
+			truncated = fmt.Sprintf(" (truncated, %d/%d lines)", limit, len(lines))
+		}
+		b.WriteString(fmt.Sprintf("--- %s%s ---\n", c.path, truncated))
+		b.WriteString(strings.Join(lines[:limit], "\n"))
+		b.WriteString("\n\n")
+		totalLines += limit
+		filesRead++
+	}
+
+	if b.Len() == 0 {
+		return "(no matching source files found)", ""
+	}
+	// Build file list
+	var names []string
+	for _, c := range candidates[:filesRead] {
+		names = append(names, c.path)
+	}
+	return b.String(), strings.Join(names, ", ")
+}
+
+// getRepoCommitDrift returns how many commits ahead the repo HEAD is from a stored commit.
+// Returns -1 if comparison fails.
+func getRepoCommitDrift(repoPath, storedCommit string) int {
+	if storedCommit == "" || repoPath == "" {
+		return -1
+	}
+	cmd := exec.Command("git", "-C", repoPath, "rev-list", "--count", storedCommit+"..HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return -1
+	}
+	n := strings.TrimSpace(string(out))
+	var count int
+	fmt.Sscanf(n, "%d", &count)
+	return count
 }
