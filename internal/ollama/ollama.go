@@ -1228,7 +1228,7 @@ func (c *Client) ProposeSubsystems(ctx context.Context, archContext string) ([]s
 Each subsystem is a logical grouping of functionality (e.g. "quiz-flow", "xp-system", "ollama-integration").
 
 Rules:
-- Propose 5-15 subsystems, ordered by importance
+- Propose 5-8 subsystems, ordered by importance
 - Each line: slug — one-sentence description
 - Slug format: lowercase-hyphenated (e.g. "quiz-flow", "state-management")
 - Focus on things a developer would forget after a few weeks away
@@ -1245,10 +1245,56 @@ slug — description`
 	var subsystems []string
 	for _, line := range strings.Split(resp, "\n") {
 		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "* ")
+		// Strip numbering like "1. " or "1) "
+		for i, ch := range line {
+			if ch == '.' || ch == ')' {
+				if i > 0 && i <= 2 {
+					line = strings.TrimSpace(line[i+1:])
+				}
+				break
+			}
+			if ch < '0' || ch > '9' {
+				break
+			}
+		}
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// Must start with a slug (lowercase-hyphenated word before " — " or " - ")
+		// Reject lines that are just commentary sentences
+		slug := line
+		if idx := strings.Index(line, " — "); idx > 0 {
+			slug = line[:idx]
+		} else if idx := strings.Index(line, " - "); idx > 0 {
+			slug = line[:idx]
+		}
+		slug = strings.TrimSpace(slug)
+		// Valid slug: no spaces, no uppercase, has a letter
+		hasLetter := false
+		valid := true
+		for _, ch := range slug {
+			if ch >= 'A' && ch <= 'Z' {
+				valid = false
+				break
+			}
+			if ch >= 'a' && ch <= 'z' {
+				hasLetter = true
+			}
+			if ch == ' ' {
+				valid = false
+				break
+			}
+		}
+		if !valid || !hasLetter {
+			continue
+		}
 		subsystems = append(subsystems, line)
+	}
+	// Cap at 8 even if ollama ignores the prompt instruction
+	if len(subsystems) > 8 {
+		subsystems = subsystems[:8]
 	}
 	return subsystems, nil
 }
@@ -1304,5 +1350,201 @@ Rules:
 	msgs = append(msgs, chatHistory...)
 	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Source code for %s subsystem:\n\n%s\n\nNow generate the knowledge document.", subsystem, sourceCode)})
 
+	return c.ChatWithHistory(ctx, system, msgs)
+}
+
+// SuggestFiles asks ollama which source files are relevant to a subsystem.
+// fileTree is a compact listing of all source files in the repo.
+func (c *Client) SuggestFiles(ctx context.Context, fileTree, archContext, subsystem string, chatHistory []Message) ([]string, error) {
+	system := fmt.Sprintf(`You are picking which source files to read for documenting the "%s" subsystem.
+
+You have the project's architecture context and a file tree listing. Pick the files most relevant to this subsystem.
+
+Rules:
+- Pick 1-5 files, ordered by importance — fewer is better, only the core files
+- Output ONLY file paths, one per line, nothing else
+- Pick files that contain the core logic for this subsystem
+- Prefer small focused files over large monolithic files
+- Skip test files, generated files, and config unless directly relevant
+- If chat history mentions specific files, prioritize those`, subsystem)
+
+	msgs := make([]Message, 0, len(chatHistory)+2)
+	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Architecture context:\n%s\n\nFile tree:\n%s\n\nWhich files should I read to document the \"%s\" subsystem?", archContext, fileTree, subsystem)})
+	for _, h := range chatHistory {
+		msgs = append(msgs, Message{Role: h.Role, Content: h.Content})
+	}
+
+	resp, err := c.ChatWithHistory(ctx, system, msgs)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseFilePaths(resp), nil
+}
+
+// parseFilePaths extracts file paths from ollama's response, handling common formatting
+// quirks like backticks, numbering, commentary, and leading ./
+func parseFilePaths(resp string) []string {
+	var files []string
+	for _, line := range strings.Split(resp, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "* ")
+		// Strip numbering like "1. " or "1) "
+		for i, ch := range line {
+			if ch == '.' || ch == ')' {
+				if i > 0 && i <= 2 {
+					line = strings.TrimSpace(line[i+1:])
+				}
+				break
+			}
+			if ch < '0' || ch > '9' {
+				break
+			}
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Strip backticks, quotes (before and after extracting path)
+		line = strings.Trim(line, "`\"'")
+		// If line has commentary after the path (e.g. "main.go — entry point"), take first token
+		if idx := strings.IndexAny(line, " \t"); idx > 0 {
+			candidate := strings.TrimSpace(line[:idx])
+			if strings.Contains(candidate, ".") {
+				line = candidate
+			}
+		}
+		// Strip backticks/quotes again (handles "1. `path`" where numbering runs before first strip)
+		line = strings.Trim(line, "`\"'")
+		// Strip leading ./
+		line = strings.TrimPrefix(line, "./")
+		if line == "" {
+			continue
+		}
+		// Validate it looks like a file path
+		if strings.Contains(line, ".") && !strings.Contains(line, " ") {
+			files = append(files, line)
+		}
+	}
+	return files
+}
+
+// ExtractFileNotes reads a source file and extracts key information for a subsystem,
+// building on accumulated notes from previously processed files.
+func (c *Client) ExtractFileNotes(ctx context.Context, fileName, fileContent, runningNotes, subsystem string) (string, error) {
+	system := fmt.Sprintf(`You are analyzing source files for the "%s" subsystem, one file at a time.
+Your job: extract the important parts — key data structures, functions, control flow, design decisions, gotchas.
+
+Rules:
+- Be DENSE and SPECIFIC — function names, struct fields, state transitions, not vague summaries
+- Note connections to things found in previously analyzed files
+- Include short code snippets for non-obvious logic (5-10 lines max each)
+- Call out implicit assumptions, ordering dependencies, edge cases
+- Output as bullet points organized by concern
+- ~30-60 lines of notes per file — enough to write a knowledge doc from later
+- If this file is less relevant than expected, say so briefly and move on`, subsystem)
+
+	prompt := fmt.Sprintf("File: %s\n\n```\n%s\n```", fileName, fileContent)
+	if runningNotes != "" {
+		prompt = fmt.Sprintf("Notes from previously analyzed files:\n%s\n\n---\n\n%s", runningNotes, prompt)
+	}
+	prompt += fmt.Sprintf("\n\nExtract the key information from %s for the %s subsystem. Build on the notes above — reference connections, add missing context, note contradictions.", fileName, subsystem)
+
+	return c.Chat(ctx, system, prompt)
+}
+
+// GenerateProjectFromNotes creates a knowledge doc from accumulated file analysis notes.
+func (c *Client) GenerateProjectFromNotes(ctx context.Context, projectName, subsystem, archContext, accumulatedNotes string, chatHistory []Message) (string, error) {
+	system := fmt.Sprintf(`You are documenting the "%s" subsystem of the "%s" project for the developer who built it.
+You have accumulated analysis notes from reading the actual source files, plus architecture context and any conversation with the developer.
+
+The goal is to fight "I forgot how my own code works" decay. Write as if explaining to yourself in 3 months.
+
+Rules:
+- Start with: # %s — %s
+- Focus on HOW it works and WHY it was built this way
+- Include key data structures, state transitions, and control flow
+- Call out non-obvious decisions and gotchas
+- Reference specific function/type names from the source analysis
+- Use these sections:
+
+## Overview
+1-3 sentences: what this subsystem does and why it exists
+
+## How It Works
+- Step-by-step mechanism, data flow, key functions
+- Include code references (function names, file:line patterns)
+- Show key data structures inline
+
+## Design Decisions
+- Why this approach? What alternatives were considered?
+- Trade-offs accepted
+
+## Gotchas
+- Things that would trip you up coming back to this code
+- Edge cases, implicit assumptions, ordering dependencies
+
+## Connections
+- requires: domain/slug (prerequisites from other knowledge files)
+- How this subsystem interacts with others
+
+- Keep it 40-80 lines — dense, specific, quizzable
+- NO markdown code fences wrapping the whole document
+- Every fact should be something worth quizzing on`, subsystem, projectName, projectName, subsystem)
+
+	msgs := make([]Message, 0, len(chatHistory)+3)
+	if archContext != "" {
+		msgs = append(msgs, Message{Role: "user", Content: "Architecture context:\n\n" + archContext})
+		msgs = append(msgs, Message{Role: "assistant", Content: "Got it. I have the project architecture context."})
+	}
+	msgs = append(msgs, chatHistory...)
+	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Here are my accumulated analysis notes from reading the source files for the %s subsystem:\n\n%s\n\nNow generate the knowledge document.", subsystem, accumulatedNotes)})
+
+	return c.ChatWithHistory(ctx, system, msgs)
+}
+
+// GenerateProjectFromContext creates a knowledge doc from architecture context + file tree only.
+// Used by batch mode to avoid expensive per-file scanning.
+func (c *Client) GenerateProjectFromContext(ctx context.Context, projectName, subsystem, archContext, fileTree string) (string, error) {
+	system := fmt.Sprintf(`You are documenting the "%s" subsystem of the "%s" project for the developer who built it.
+You have the project's architecture docs (CLAUDE.md/README) and its file tree. Use these to write a focused knowledge document.
+
+The goal is to fight "I forgot how my own code works" decay. Write as if explaining to yourself in 3 months.
+
+Rules:
+- Start with: # %s — %s
+- Focus on HOW it works and WHY it was built this way
+- Include key data structures, state transitions, and control flow
+- Call out non-obvious decisions and gotchas
+- Reference specific function/type/file names from the architecture docs
+- Use these sections:
+
+## Overview
+1-3 sentences: what this subsystem does and why it exists
+
+## How It Works
+- Step-by-step mechanism, data flow, key functions
+- Include code references (function names, file paths)
+- Show key data structures inline
+
+## Design Decisions
+- Why this approach? What alternatives were considered?
+- Trade-offs accepted
+
+## Gotchas
+- Things that would trip you up coming back to this code
+- Edge cases, implicit assumptions, ordering dependencies
+
+## Connections
+- requires: domain/slug (prerequisites from other knowledge files)
+- How this subsystem interacts with others
+
+- Keep it 40-80 lines — dense, specific, quizzable
+- NO markdown code fences wrapping the whole document
+- Every fact should be something worth quizzing on`, subsystem, projectName, projectName, subsystem)
+
+	msgs := []Message{
+		{Role: "user", Content: fmt.Sprintf("Architecture context:\n\n%s\n\nFile tree:\n%s\n\nGenerate the knowledge document for the %s subsystem.", archContext, fileTree, subsystem)},
+	}
 	return c.ChatWithHistory(ctx, system, msgs)
 }

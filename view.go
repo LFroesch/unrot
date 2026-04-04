@@ -1464,7 +1464,7 @@ func (m model) renderProject() string {
 	case projectPicking:
 		var b strings.Builder
 		b.WriteString(titleStyle.Render(fmt.Sprintf("  %s — pick a subsystem", m.projectName)))
-		b.WriteString("\n\n")
+		b.WriteString("  " + dimStyle.Render("enter=pick one  a=generate all") + "\n\n")
 		visible := m.contentHeight() - 4
 		if visible < 3 {
 			visible = 3
@@ -1506,11 +1506,53 @@ func (m model) renderProject() string {
 		}
 		return b.String()
 
+	case projectScanning:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render(fmt.Sprintf("  %s / %s", m.projectName, m.projectSubsystem)))
+		if m.projectBatchMode {
+			b.WriteString("  " + dimStyle.Render(fmt.Sprintf("batch: %d done, %d remaining", len(m.projectBatchDone), len(m.projectBatchQueue)+1)))
+		}
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("  %s %s", m.spinner.View(), m.projectScanStatus))
+		return b.String()
+
+	case projectProcessing:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render(fmt.Sprintf("  %s / %s", m.projectName, m.projectSubsystem)))
+		if m.projectBatchMode {
+			b.WriteString("  " + dimStyle.Render(fmt.Sprintf("batch: %d done, %d remaining", len(m.projectBatchDone), len(m.projectBatchQueue)+1)))
+		}
+		b.WriteString("\n\n")
+		// Progress bar
+		total := len(m.projectScanFiles)
+		done := m.projectScanIdx
+		bar := strings.Repeat("█", done) + strings.Repeat("░", total-done)
+		b.WriteString(fmt.Sprintf("  %s  [%s]  %d/%d files\n\n", m.spinner.View(), bar, done, total))
+		b.WriteString("  " + m.projectScanStatus + "\n")
+		// Show files list with checkmarks
+		for i, f := range m.projectScanFiles {
+			if i < done {
+				b.WriteString(actionStyle.Render("  ✓ ") + dimStyle.Render(f) + "\n")
+			} else if i == done {
+				b.WriteString(domainStyle.Render("  → ") + f + "\n")
+			} else {
+				b.WriteString(dimStyle.Render("    " + f) + "\n")
+			}
+		}
+		return b.String()
+
 	case projectGenerating:
 		var b strings.Builder
 		b.WriteString(titleStyle.Render(fmt.Sprintf("  %s / %s", m.projectName, m.projectSubsystem)))
+		if m.projectBatchMode {
+			b.WriteString("  " + dimStyle.Render(fmt.Sprintf("batch: %d done, %d remaining", len(m.projectBatchDone), len(m.projectBatchQueue)+1)))
+		}
 		b.WriteString("\n\n")
-		b.WriteString(fmt.Sprintf("  %s generating knowledge doc...", m.spinner.View()))
+		if m.projectBatchMode {
+			b.WriteString(fmt.Sprintf("  %s %s", m.spinner.View(), m.projectScanStatus))
+		} else {
+			b.WriteString(fmt.Sprintf("  %s synthesizing knowledge doc from %d files...", m.spinner.View(), len(m.projectScanFiles)))
+		}
 		return b.String()
 
 	case projectReview:
@@ -2016,7 +2058,7 @@ func (m model) renderStatus() string {
 			}
 		case projectPicking:
 			keys = []struct{ key, action string }{
-				{"↑↓", "move"}, {"enter", "select"}, {"esc", "back"},
+				{"↑↓", "move"}, {"enter", "select"}, {"a", "generate all"}, {"esc", "back"},
 			}
 		case projectChat:
 			if m.projectChatLoading {
@@ -2028,9 +2070,17 @@ func (m model) renderStatus() string {
 					{"enter", "send"}, {"ctrl+g", "generate"}, {"esc", "back"},
 				}
 			}
+		case projectScanning:
+			keys = []struct{ key, action string }{
+				{"", "picking files..."}, {"esc", "cancel"},
+			}
+		case projectProcessing:
+			keys = []struct{ key, action string }{
+				{"", m.projectScanStatus}, {"esc", "cancel"},
+			}
 		case projectGenerating:
 			keys = []struct{ key, action string }{
-				{"", "generating..."}, {"esc", "cancel"},
+				{"", "synthesizing..."}, {"esc", "cancel"},
 			}
 		case projectReview:
 			keys = []struct{ key, action string }{

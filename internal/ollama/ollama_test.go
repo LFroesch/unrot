@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -106,7 +107,7 @@ func TestQuestionQuality(t *testing.T) {
 			for _, diff := range diffs {
 				name := fmt.Sprintf("%s/%s/%s", tc.name, qt.name, diff)
 				t.Run(name, func(t *testing.T) {
-					q, err := c.GenerateQuestion(tc.content, tc.file, qt.qt, diff)
+					q, err := c.GenerateQuestion(context.Background(), tc.content, tc.file, qt.qt, diff)
 					if err != nil {
 						t.Fatalf("GenerateQuestion failed: %v", err)
 					}
@@ -157,6 +158,40 @@ func TestQuestionQuality(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestParseFilePaths(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"clean paths", "main.go\nmodel.go\ninternal/state/state.go", []string{"main.go", "model.go", "internal/state/state.go"}},
+		{"backticks", "`main.go`\n`internal/ollama/ollama.go`", []string{"main.go", "internal/ollama/ollama.go"}},
+		{"numbered", "1. main.go\n2. model.go\n3. update.go", []string{"main.go", "model.go", "update.go"}},
+		{"numbered paren", "1) main.go\n2) model.go", []string{"main.go", "model.go"}},
+		{"bullets", "- main.go\n- model.go\n* update.go", []string{"main.go", "model.go", "update.go"}},
+		{"commentary", "main.go — entry point\nmodel.go (core types)\nupdate.go # key handling", []string{"main.go", "model.go", "update.go"}},
+		{"leading dot-slash", "./main.go\n./internal/state/state.go", []string{"main.go", "internal/state/state.go"}},
+		{"mixed garbage", "Here are the files:\n\n1. `./main.go` — entry\n2. `internal/ollama/ollama.go`\n\nThese are the most relevant.", []string{"main.go", "internal/ollama/ollama.go"}},
+		{"hyphenated names", "my-app.go\ncmd/my-tool.go", []string{"my-app.go", "cmd/my-tool.go"}},
+		{"quoted", `"main.go"`, []string{"main.go"}},
+		{"skip headers", "# Files\nmain.go", []string{"main.go"}},
+		{"empty", "", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseFilePaths(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d files %v, want %d %v", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("file[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
 	}
 }
 
@@ -573,7 +608,7 @@ func TestLiveChallenge(t *testing.T) {
 				name = fmt.Sprintf("domain=any/diff=%s", diff)
 			}
 			t.Run(name, func(t *testing.T) {
-				ch, err := c.GenerateChallenge(domain, diff)
+				ch, err := c.GenerateChallenge(context.Background(), domain, diff)
 				if err != nil {
 					t.Fatalf("GenerateChallenge failed: %v", err)
 				}
@@ -588,7 +623,7 @@ func TestLiveChallenge(t *testing.T) {
 
 				// Grade a dummy submission
 				code := "// placeholder solution\nfunc solve() {}"
-				grade, err := c.GradeChallenge(ch, code)
+				grade, err := c.GradeChallenge(context.Background(), ch, code)
 				if err != nil {
 					t.Fatalf("GradeChallenge failed: %v", err)
 				}

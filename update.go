@@ -256,9 +256,39 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectContentMsg:
 		m.projectContent = msg.content
+		if m.projectBatchMode {
+			// Auto-save without user review
+			projectLog("generated doc for %s, auto-saving...", m.projectSubsystem)
+			return m, batchSaveKnowledgeCmd(m.brainPath, m.projectRepoPath, m.projectName, m.projectSubsystem, msg.content, m.projectSourceFiles)
+		}
 		m.projectStep = projectReview
 		m.syncViewport()
 		return m, nil
+
+	case projectFilesMsg:
+		m.projectScanFiles = msg.files
+		m.projectScanIdx = 0
+		m.projectScanNotes = ""
+		m.projectSourceFiles = strings.Join(msg.files, ", ")
+		m.projectStep = projectProcessing
+		m.projectScanStatus = fmt.Sprintf("reading %s (1/%d)...", filepath.Base(msg.files[0]), len(msg.files))
+		projectLog("[%s] files selected (%d): %v", m.projectSubsystem, len(msg.files), msg.files)
+		return m, processFileCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectScanFiles, 0, "", m.projectSubsystem)
+
+	case projectFileProcessedMsg:
+		m.projectScanNotes = msg.notes
+		next := msg.fileIdx + 1
+		if next < len(m.projectScanFiles) {
+			m.projectScanIdx = next
+			m.projectScanStatus = fmt.Sprintf("reading %s (%d/%d)...", filepath.Base(m.projectScanFiles[next]), next+1, len(m.projectScanFiles))
+			projectLog("[%s] processed %s (%d/%d)", m.projectSubsystem, filepath.Base(m.projectScanFiles[msg.fileIdx]), msg.fileIdx+1, len(m.projectScanFiles))
+			return m, processFileCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectScanFiles, next, m.projectScanNotes, m.projectSubsystem)
+		}
+		// All files processed — synthesize into knowledge doc
+		projectLog("[%s] all files processed, synthesizing doc...", m.projectSubsystem)
+		m.projectStep = projectGenerating
+		m.projectScanStatus = "synthesizing knowledge doc..."
+		return m, generateProjectFromNotesCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectScanNotes, m.projectChatHistory)
 
 	case learnContentMsg:
 		m.learnContent = msg.content
@@ -293,9 +323,30 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(&m).queueAlert(alertAchievement, fmt.Sprintf("%s — %s", info.Name, info.Desc))
 		}
 		m.state.Save()
-		// Project mode: go back to subsystem picker after saving
+		// Project mode: go back to subsystem picker after saving (or advance batch)
 		if m.phase == phaseProject {
 			(&m).queueAlert(alertXP, fmt.Sprintf("+50 XP — saved %s", m.projectSubsystem))
+			if m.projectBatchMode {
+				m.projectBatchDone = append(m.projectBatchDone, m.projectSubsystem)
+				if len(m.projectBatchQueue) > 0 {
+					next := m.projectBatchQueue[0]
+					m.projectBatchQueue = m.projectBatchQueue[1:]
+					m.projectSubsystem = next
+					m.projectSourceFiles = ""
+					m.projectChatHistory = nil
+					m.projectStep = projectGenerating
+					total := len(m.projectBatchDone) + 1 + len(m.projectBatchQueue)
+					m.projectScanStatus = fmt.Sprintf("generating %s (%d/%d)...", next, len(m.projectBatchDone)+1, total)
+					projectLog("starting next batch subsystem: %s (%d remaining)", next, len(m.projectBatchQueue))
+					return m, batchGenerateProjectCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectName, next, m.projectArchContext)
+				}
+				// All done
+				projectLog("batch complete: %d subsystems generated", len(m.projectBatchDone))
+				m.projectBatchMode = false
+				m.projectStep = projectPicking
+				m.toast = fmt.Sprintf("generated %d subsystems", len(m.projectBatchDone))
+				return m, nil
+			}
 			m.projectStep = projectPicking
 			return m, nil
 		}
@@ -2627,6 +2678,31 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.projectSubCursor++
 			}
 			return m, nil
+		case "a":
+			// Generate ALL subsystems in sequence, no chat
+			if len(m.projectSubsystems) == 0 {
+				return m, nil
+			}
+			slugs := make([]string, 0, len(m.projectSubsystems))
+			for _, s := range m.projectSubsystems {
+				slug := s
+				if dashIdx := strings.Index(s, " — "); dashIdx > 0 {
+					slug = s[:dashIdx]
+				} else if dashIdx := strings.Index(s, " - "); dashIdx > 0 {
+					slug = s[:dashIdx]
+				}
+				slugs = append(slugs, strings.TrimSpace(slug))
+			}
+			m.projectBatchMode = true
+			m.projectBatchDone = nil
+			m.projectSubsystem = slugs[0]
+			m.projectBatchQueue = slugs[1:]
+			m.projectSourceFiles = ""
+			m.projectChatHistory = nil
+			m.projectStep = projectGenerating
+			m.projectScanStatus = fmt.Sprintf("generating %s (1/%d)...", slugs[0], len(slugs))
+			projectLog("batch start: %s — %d subsystems: %v", m.projectName, len(slugs), slugs)
+			return m, batchGenerateProjectCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectName, slugs[0], m.projectArchContext)
 		case "enter":
 			selected := m.projectSubsystems[m.projectSubCursor]
 			// Extract slug (before " — ")
@@ -2643,7 +2719,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.learnTA.Placeholder = "clarify focus, or ctrl+g to generate..."
 			m.learnTA.Focus()
 			m.projectStep = projectChat
-			return m, projectClarifyCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectChatHistory)
+			return m, projectClarifyCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectChatHistory)
 		}
 		return m, nil
 
@@ -2653,10 +2729,9 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.projectStep = projectPicking
 			return m, nil
 		case "ctrl+g":
-			m.projectStep = projectGenerating
-			sourceCode, sourceFileList := readSubsystemFiles(m.projectRepoPath, m.projectSubsystem, m.projectChatHistory)
-			m.projectSourceFiles = sourceFileList
-			return m, generateProjectKnowledgeCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, sourceCode, m.projectChatHistory)
+			m.projectStep = projectScanning
+			m.projectScanStatus = "scanning repo files..."
+			return m, suggestFilesCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectArchContext, m.projectSubsystem, m.projectChatHistory)
 		case "enter":
 			if m.projectChatLoading {
 				return m, nil
@@ -2668,13 +2743,20 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.projectChatHistory = append(m.projectChatHistory, chatEntry{role: "user", content: input})
 			m.learnTA.Reset()
 			m.projectChatLoading = true
-			return m, projectClarifyCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectChatHistory)
+			return m, projectClarifyCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectChatHistory)
 		default:
 			if !m.projectChatLoading {
 				var cmd tea.Cmd
 				m.learnTA, cmd = m.learnTA.Update(msg)
 				return m, cmd
 			}
+		}
+		return m, nil
+
+	case projectScanning, projectProcessing:
+		if key == "esc" {
+			m.projectStep = projectChat
+			return m, nil
 		}
 		return m, nil
 
@@ -2708,10 +2790,15 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 			content = content + "\n\n" + knowledge.FormatSource(sourceMeta)
 			return m, saveKnowledge(m.brainPath, domain, slug, content)
 		case "r":
-			m.projectStep = projectGenerating
-			sourceCode, sourceFileList := readSubsystemFiles(m.projectRepoPath, m.projectSubsystem, m.projectChatHistory)
-			m.projectSourceFiles = sourceFileList
-			return m, generateProjectKnowledgeCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, sourceCode, m.projectChatHistory)
+			// Re-synthesize from existing notes if we have them, otherwise rescan
+			if m.projectScanNotes != "" {
+				m.projectStep = projectGenerating
+				m.projectScanStatus = "regenerating knowledge doc..."
+				return m, generateProjectFromNotesCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectScanNotes, m.projectChatHistory)
+			}
+			m.projectStep = projectScanning
+			m.projectScanStatus = "scanning repo files..."
+			return m, suggestFilesCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectArchContext, m.projectSubsystem, m.projectChatHistory)
 		default:
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)

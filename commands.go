@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -98,6 +97,11 @@ type clipboardMsg struct{ ok bool }
 type projectSubsystemsMsg struct{ subsystems []string }
 type projectChatMsg struct{ text string }
 type projectContentMsg struct{ content string }
+type projectFilesMsg struct{ files []string }
+type projectFileProcessedMsg struct {
+	notes   string
+	fileIdx int
+}
 
 type errMsg struct{ err error }
 
@@ -659,7 +663,7 @@ func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, archContex
 	}
 }
 
-func projectClarifyCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext string, history []chatEntry) tea.Cmd {
+func projectClarifyCmd(ctx context.Context, client *ollama.Client, repoPath, projectName, subsystem, archContext string, history []chatEntry) tea.Cmd {
 	return func() tea.Msg {
 		system := fmt.Sprintf(`You are helping a developer document the "%s" subsystem of their "%s" project.
 Ask 1-2 clarifying questions about what aspects to focus on:
@@ -667,13 +671,16 @@ Ask 1-2 clarifying questions about what aspects to focus on:
 - What non-obvious decisions should the doc capture?
 - Any gotchas they want to make sure are recorded?
 
+You can see the project's file tree — reference specific files by name when asking about focus areas.
+
 Rules:
 - Keep it conversational — 2-3 sentences max
 - If you already have enough context, say: "Got it. Press ctrl+g to generate the knowledge doc."
 - Don't repeat questions they already answered`, subsystem, projectName)
 
+		fileTree := listRepoTree(repoPath)
 		msgs := make([]ollama.Message, 0, len(history)+2)
-		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to document the %s subsystem.\n\nArchitecture context:\n%s", subsystem, archContext)})
+		msgs = append(msgs, ollama.Message{Role: "user", Content: fmt.Sprintf("I want to document the %s subsystem.\n\nArchitecture context:\n%s\n\nFile tree:\n%s", subsystem, archContext, fileTree)})
 		for _, h := range history {
 			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
 		}
@@ -686,18 +693,178 @@ Rules:
 	}
 }
 
-func generateProjectKnowledgeCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext, sourceCode string, history []chatEntry) tea.Cmd {
+// suggestFilesCmd asks ollama which source files to read for a subsystem.
+func suggestFilesCmd(ctx context.Context, client *ollama.Client, repoPath, archContext, subsystem string, chatHistory []chatEntry) tea.Cmd {
 	return func() tea.Msg {
-		msgs := make([]ollama.Message, len(history))
-		for i, h := range history {
+		tree := listRepoTree(repoPath)
+		msgs := make([]ollama.Message, len(chatHistory))
+		for i, h := range chatHistory {
 			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
 		}
-		content, err := client.GenerateProjectKnowledge(ctx, projectName, subsystem, archContext, sourceCode, msgs)
+		files, err := client.SuggestFiles(ctx, tree, archContext, subsystem, msgs)
+		if err != nil {
+			return errMsg{err}
+		}
+
+		// Build a set of all real files for fuzzy matching
+		treeFiles := strings.Split(tree, "\n")
+		byBasename := make(map[string][]string)
+		for _, tf := range treeFiles {
+			tf = strings.TrimSpace(tf)
+			if tf != "" {
+				byBasename[filepath.Base(tf)] = append(byBasename[filepath.Base(tf)], tf)
+			}
+		}
+
+		// Validate files exist, with fallback strategies
+		seen := make(map[string]bool)
+		var valid []string
+		addIfExists := func(f string) bool {
+			if seen[f] {
+				return false
+			}
+			abs := filepath.Join(repoPath, f)
+			if _, err := os.Stat(abs); err == nil {
+				seen[f] = true
+				valid = append(valid, f)
+				return true
+			}
+			return false
+		}
+		for _, f := range files {
+			if addIfExists(f) {
+				continue
+			}
+			// Try stripping a leading directory (ollama often prepends repo name)
+			if idx := strings.IndexByte(f, '/'); idx >= 0 {
+				if addIfExists(f[idx+1:]) {
+					continue
+				}
+			}
+			// Basename fallback — if unique match in tree
+			base := filepath.Base(f)
+			if matches, ok := byBasename[base]; ok && len(matches) == 1 {
+				addIfExists(matches[0])
+			}
+		}
+		if len(valid) == 0 {
+			return errMsg{fmt.Errorf("ollama couldn't identify relevant source files — try mentioning specific filenames in the chat")}
+		}
+		return projectFilesMsg{files: valid}
+	}
+}
+
+// processFileCmd reads a single source file and extracts notes, chaining with accumulated context.
+func processFileCmd(ctx context.Context, client *ollama.Client, repoPath string, files []string, idx int, runningNotes, subsystem string) tea.Cmd {
+	return func() tea.Msg {
+		f := files[idx]
+		data, err := os.ReadFile(filepath.Join(repoPath, f))
+		if err != nil {
+			// Skip unreadable files, pass notes through
+			return projectFileProcessedMsg{notes: runningNotes, fileIdx: idx}
+		}
+
+		content := string(data)
+		lines := strings.Split(content, "\n")
+
+		// Cap very large files to avoid excessive ollama calls
+		const maxLines = 1500
+		if len(lines) > maxLines {
+			lines = lines[:maxLines]
+			content = strings.Join(lines, "\n")
+		}
+
+		// If file is large, chunk it — process in ~600 line chunks, accumulating notes per chunk
+		const chunkSize = 600
+		if len(lines) > chunkSize {
+			chunkNotes := runningNotes
+			for start := 0; start < len(lines); start += chunkSize {
+				end := start + chunkSize
+				if end > len(lines) {
+					end = len(lines)
+				}
+				chunkLabel := fmt.Sprintf("%s (lines %d-%d)", f, start+1, end)
+				chunk := strings.Join(lines[start:end], "\n")
+				extracted, err := client.ExtractFileNotes(ctx, chunkLabel, chunk, chunkNotes, subsystem)
+				if err != nil {
+					break
+				}
+				chunkNotes = extracted
+			}
+			return projectFileProcessedMsg{notes: chunkNotes, fileIdx: idx}
+		}
+
+		notes, err := client.ExtractFileNotes(ctx, f, content, runningNotes, subsystem)
+		if err != nil {
+			return projectFileProcessedMsg{notes: runningNotes, fileIdx: idx}
+		}
+		return projectFileProcessedMsg{notes: notes, fileIdx: idx}
+	}
+}
+
+// generateProjectFromNotesCmd synthesizes a knowledge doc from accumulated file notes.
+func generateProjectFromNotesCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext, notes string, chatHistory []chatEntry) tea.Cmd {
+	return func() tea.Msg {
+		msgs := make([]ollama.Message, len(chatHistory))
+		for i, h := range chatHistory {
+			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
+		}
+		content, err := client.GenerateProjectFromNotes(ctx, projectName, subsystem, archContext, notes, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
 		return projectContentMsg{content: content}
 	}
+}
+
+// batchGenerateProjectCmd generates a knowledge doc from arch context + file tree (no source scanning).
+func batchGenerateProjectCmd(ctx context.Context, client *ollama.Client, repoPath, projectName, subsystem, archContext string) tea.Cmd {
+	return func() tea.Msg {
+		tree := listRepoTree(repoPath)
+		content, err := client.GenerateProjectFromContext(ctx, projectName, subsystem, archContext, tree)
+		if err != nil {
+			return errMsg{err}
+		}
+		return projectContentMsg{content: content}
+	}
+}
+
+// listRepoTree returns a compact file tree for the repo (source files only).
+func listRepoTree(repoPath string) string {
+	sourceExts := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
+		".rs": true, ".java": true, ".c": true, ".h": true, ".cpp": true, ".rb": true,
+		".sh": true, ".sql": true, ".yaml": true, ".yml": true, ".toml": true,
+		".md": true, ".json": true, ".proto": true, ".graphql": true,
+	}
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true, "__pycache__": true,
+		"dist": true, "build": true, ".next": true, "target": true,
+	}
+
+	var files []string
+	filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if sourceExts[filepath.Ext(info.Name())] {
+			rel, _ := filepath.Rel(repoPath, path)
+			files = append(files, rel)
+		}
+		return nil
+	})
+
+	// Cap at 200 files to keep context small
+	if len(files) > 200 {
+		files = files[:200]
+	}
+	return strings.Join(files, "\n")
 }
 
 // readProjectContext reads CLAUDE.md and README.md from a repo directory.
@@ -722,141 +889,44 @@ func getRepoHead(repoPath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// readSubsystemFiles reads source files from a repo that are relevant to a subsystem.
-// It scores files by name match against the subsystem slug and any files mentioned in chat,
-// then returns their contents truncated to fit a reasonable context window (~6k lines total).
-// Returns (content, comma-separated file list).
-func readSubsystemFiles(repoPath, subsystem string, chatHistory []chatEntry) (string, string) {
-	// Collect file mentions from chat history
-	var chatMentions []string
-	for _, h := range chatHistory {
-		for _, word := range strings.Fields(h.content) {
-			// Look for things that look like filenames
-			if strings.Contains(word, ".") && !strings.HasPrefix(word, "http") {
-				clean := strings.Trim(word, ",.;:()\"'`")
-				chatMentions = append(chatMentions, strings.ToLower(clean))
-			}
+// projectLog appends a timestamped line to ~/.local/share/unrot/project-batch.log.
+func projectLog(format string, args ...any) {
+	home, _ := os.UserHomeDir()
+	logPath := filepath.Join(home, ".local", "share", "unrot", "project-batch.log")
+	_ = os.MkdirAll(filepath.Dir(logPath), 0755)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	msg := fmt.Sprintf(format, args...)
+	fmt.Fprintf(f, "[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), msg)
+}
+
+// batchSaveKnowledgeCmd saves a project subsystem doc with source metadata attached.
+func batchSaveKnowledgeCmd(brainPath, repoPath, projectName, subsystem, content, sourceFiles string) tea.Cmd {
+	return func() tea.Msg {
+		files := sourceFiles
+		if files == "" {
+			files = "(architecture context only)"
 		}
-	}
-
-	// Scan repo for source files
-	var sourceFiles []string
-	sourceExts := map[string]bool{
-		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
-		".rs": true, ".java": true, ".c": true, ".h": true, ".cpp": true, ".rb": true,
-		".sh": true, ".sql": true, ".yaml": true, ".yml": true, ".toml": true,
-	}
-	skipDirs := map[string]bool{
-		".git": true, "node_modules": true, "vendor": true, "__pycache__": true,
-		"dist": true, "build": true, ".next": true, "target": true,
-	}
-
-	filepath.Walk(repoPath, func(path string, info os.FileInfo, err error) error {
+		sourceMeta := &knowledge.SourceMeta{
+			Repo:     repoPath,
+			Files:    files,
+			Analyzed: time.Now().Format("2006-01-02"),
+			Commit:   getRepoHead(repoPath),
+		}
+		full := content + "\n\n" + knowledge.FormatSource(sourceMeta)
+		domain := "projects/" + projectName
+		projectLog("saving %s/%s (files: %s)", domain, subsystem, files)
+		relPath, err := knowledge.WriteFile(brainPath, domain, subsystem, full)
 		if err != nil {
-			return nil
+			projectLog("ERROR saving %s/%s: %v", domain, subsystem, err)
+			return errMsg{err}
 		}
-		if info.IsDir() {
-			if skipDirs[info.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		ext := filepath.Ext(info.Name())
-		if sourceExts[ext] && info.Size() < 500_000 { // skip huge files
-			rel, _ := filepath.Rel(repoPath, path)
-			sourceFiles = append(sourceFiles, rel)
-		}
-		return nil
-	})
-
-	// Score each file for relevance
-	slugWords := strings.Split(strings.ReplaceAll(subsystem, "-", " "), " ")
-	type scored struct {
-		path  string
-		score int
+		projectLog("saved -> %s", relPath)
+		return learnSavedMsg{relPath: relPath}
 	}
-	var candidates []scored
-	for _, f := range sourceFiles {
-		s := 0
-		fl := strings.ToLower(f)
-		base := strings.ToLower(filepath.Base(f))
-
-		// Exact filename mention in chat = highest priority
-		for _, mention := range chatMentions {
-			if base == mention || fl == mention {
-				s += 100
-			}
-		}
-
-		// Subsystem slug word match against path
-		for _, w := range slugWords {
-			if len(w) < 2 {
-				continue
-			}
-			if strings.Contains(fl, w) {
-				s += 10
-			}
-		}
-
-		// Bonus for shorter paths (more central files)
-		depth := strings.Count(f, string(filepath.Separator))
-		if depth <= 1 {
-			s += 3
-		}
-
-		if s > 0 {
-			candidates = append(candidates, scored{f, s})
-		}
-	}
-
-	// Sort by score descending
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].score > candidates[j].score
-	})
-
-	// Read top files, truncated to ~6k lines total
-	const maxLines = 6000
-	const maxPerFile = 300
-	var b strings.Builder
-	totalLines := 0
-	filesRead := 0
-
-	for _, c := range candidates {
-		if totalLines >= maxLines || filesRead >= 10 {
-			break
-		}
-		data, err := os.ReadFile(filepath.Join(repoPath, c.path))
-		if err != nil {
-			continue
-		}
-		lines := strings.Split(string(data), "\n")
-		limit := maxPerFile
-		if len(lines) < limit {
-			limit = len(lines)
-		}
-		if totalLines+limit > maxLines {
-			limit = maxLines - totalLines
-		}
-		truncated := ""
-		if len(lines) > limit {
-			truncated = fmt.Sprintf(" (truncated, %d/%d lines)", limit, len(lines))
-		}
-		b.WriteString(fmt.Sprintf("--- %s%s ---\n", c.path, truncated))
-		b.WriteString(strings.Join(lines[:limit], "\n"))
-		b.WriteString("\n\n")
-		totalLines += limit
-		filesRead++
-	}
-
-	if b.Len() == 0 {
-		return "(no matching source files found)", ""
-	}
-	// Build file list
-	var names []string
-	for _, c := range candidates[:filesRead] {
-		names = append(names, c.path)
-	}
-	return b.String(), strings.Join(names, ", ")
 }
 
 // getRepoCommitDrift returns how many commits ahead the repo HEAD is from a stored commit.

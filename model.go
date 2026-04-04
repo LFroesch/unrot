@@ -95,7 +95,9 @@ const (
 	projectProposing                     // ollama proposing subsystems (spinner)
 	projectPicking                       // user picks subsystem from proposal list
 	projectChat                          // conversational clarification before generating
-	projectGenerating                    // generating knowledge doc (spinner)
+	projectScanning                      // ollama picking which files to read
+	projectProcessing                    // reading files one by one (chained)
+	projectGenerating                    // synthesizing knowledge doc from notes (spinner)
 	projectReview                        // review generated content (viewport)
 )
 
@@ -326,6 +328,15 @@ type model struct {
 	projectChatLoading  bool       // waiting for ollama
 	projectContent      string     // generated knowledge content
 	projectSourceFiles  string     // comma-separated list of files read for current subsystem
+	projectScanFiles    []string   // files ollama picked to read
+	projectScanIdx      int        // index of file currently being processed
+	projectScanNotes    string     // accumulated notes from processed files
+	projectScanStatus   string     // "reading model.go (2/4)..." for display
+
+	// Batch generation ("A" on picker)
+	projectBatchMode  bool
+	projectBatchQueue []string // remaining subsystem slugs to process
+	projectBatchDone  []string // completed slugs
 
 	// Daily goal
 	dailyGoal int

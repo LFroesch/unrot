@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,7 +42,7 @@ REASON: <one sentence explaining why>
 
 Be strict. If it's borderline, FAIL it.`
 
-	resp, err := c.Chat(system, fmt.Sprintf("Criteria: %s\n\nContent to evaluate:\n%s", criteria, content))
+	resp, err := c.Chat(context.Background(), system, fmt.Sprintf("Criteria: %s\n\nContent to evaluate:\n%s", criteria, content))
 	if err != nil {
 		return false, fmt.Sprintf("judge error: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestPromptEval(t *testing.T) {
 			for _, diff := range diffs {
 				name := fmt.Sprintf("%s/%s/%s", topic.name, qt.name, diff)
 				t.Run(name, func(t *testing.T) {
-					q, err := c.GenerateQuestion(topic.content, topic.file, qt.qt, diff)
+					q, err := c.GenerateQuestion(context.Background(), topic.content, topic.file, qt.qt, diff)
 					if err != nil {
 						t.Fatalf("GenerateQuestion failed: %v", err)
 					}
@@ -276,7 +277,7 @@ func TestPromptEvalGrading(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
-			grade, err := c.GradeAnswer(tc.question, tc.correctAnswer, tc.userAnswer)
+			grade, err := c.GradeAnswer(context.Background(), tc.question, tc.correctAnswer, tc.userAnswer)
 			if err != nil {
 				t.Fatalf("GradeAnswer failed: %v", err)
 			}
@@ -362,7 +363,7 @@ Rules:
 					user += fmt.Sprintf("\n\nPrevious hints:\n%s", strings.Join(hints, "\n"))
 				}
 
-				resp, err := c.Chat(system, user)
+				resp, err := c.Chat(context.Background(), system, user)
 				if err != nil {
 					t.Fatalf("hint %d failed: %v", i+1, err)
 				}
@@ -455,7 +456,7 @@ Rules:
 			user := fmt.Sprintf("Question: %s\nCorrect answer: %s\nBrief explanation: %s\n\nSource material:\n%s\n\nTeach me this concept. Include a concrete example.",
 				tc.question, tc.answer, tc.explanation, tc.source)
 
-			resp, err := c.Chat(system, user)
+			resp, err := c.Chat(context.Background(), system, user)
 			if err != nil {
 				t.Fatalf("explain failed: %v", err)
 			}
@@ -513,7 +514,7 @@ func TestPromptEvalChallenges(t *testing.T) {
 		for _, diff := range diffs {
 			name := fmt.Sprintf("%s/%s", domain, diff)
 			t.Run(name, func(t *testing.T) {
-				ch, err := c.GenerateChallenge(domain, diff)
+				ch, err := c.GenerateChallenge(context.Background(), domain, diff)
 				if err != nil {
 					t.Fatalf("GenerateChallenge failed: %v", err)
 				}
@@ -549,7 +550,7 @@ func TestPromptEvalChallenges(t *testing.T) {
 
 				// Grade a clearly wrong solution — should get low score
 				badCode := "// I don't know\nfunc solve() { return nil }"
-				grade, err := c.GradeChallenge(ch, badCode)
+				grade, err := c.GradeChallenge(context.Background(), ch, badCode)
 				if err != nil {
 					t.Fatalf("GradeChallenge failed: %v", err)
 				}
