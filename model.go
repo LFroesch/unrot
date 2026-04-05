@@ -91,10 +91,12 @@ const (
 type projectStep int
 
 const (
-	projectRepoInput  projectStep = iota // enter repo path
-	projectProposing                     // ollama proposing subsystems with file mappings (spinner)
-	projectGenerating                    // generating knowledge doc from source code (spinner, 1 call per subsystem)
-	projectDone                          // summary screen showing all generated files
+	projectRepoInput     projectStep = iota // enter repo path
+	projectCheckingStale                    // checking existing knowledge for staleness
+	projectStaleResult                      // showing stale/fresh results, user picks action
+	projectProposing                        // ollama proposing subsystems with file mappings (spinner)
+	projectGenerating                       // extracting notes per file + synthesizing (spinner)
+	projectDone                             // summary screen showing all generated files
 )
 
 // --- Question tabs (during stepQuestion) ---
@@ -149,8 +151,16 @@ type projectBatchEntry struct {
 	slug      string
 	files     []string // source files mapped to this subsystem
 	fileCount int      // how many source files were read
-	status    string   // "pending", "generating", "saving", "done"
+	status    string   // "pending", "extracting", "synthesizing", "saving", "done"
 	savedPath string   // final knowledge file path (set on save)
+	notes     string   // accumulated ExtractFileNotes output
+}
+
+type projectStaleInfo struct {
+	slug   string
+	commit string // stored commit hash
+	drift  int    // commits since last scan (-1 = unknown)
+	files  string // stored file list from SourceMeta
 }
 
 type chatEntry struct {
@@ -331,9 +341,15 @@ type model struct {
 	projectScanStatus  string    // status text for display
 	projectStartTime   time.Time // when scan started (for elapsed timer)
 
-	// Batch pipeline (auto-generates all subsystems, 1 ollama call each)
+	// Batch pipeline (two-pass: extract notes per file, then synthesize)
 	projectBatchQueue   []string            // remaining subsystem slugs to process
 	projectBatchEntries []projectBatchEntry // all subsystems with status for progress display
+	projectFileIdx      int                 // index into current subsystem's file list
+	projectRunningNotes string              // accumulated notes from ExtractFileNotes calls
+
+	// Staleness checking
+	projectStaleEntries []projectStaleInfo // results of staleness check
+	projectLogFile      *os.File           // ollama request/response log for project mode
 
 	// Daily goal
 	dailyGoal int

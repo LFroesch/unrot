@@ -756,6 +756,22 @@ func stripCodeFences(text string) string {
 	return strings.Join(out, "\n")
 }
 
+// stripOuterFence removes a single wrapping ```[lang] ... ``` if the entire response is wrapped in one.
+func stripOuterFence(text string) string {
+	text = strings.TrimSpace(text)
+	lines := strings.Split(text, "\n")
+	if len(lines) < 2 {
+		return text
+	}
+	first := strings.TrimSpace(lines[0])
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if strings.HasPrefix(first, "```") && last == "```" {
+		inner := strings.Join(lines[1:len(lines)-1], "\n")
+		return strings.TrimSpace(inner)
+	}
+	return text
+}
+
 func parseQA(text string, qtype QuestionType) (*Question, error) {
 	lines := strings.Split(strings.TrimSpace(text), "\n")
 	var qLines, eLines []string
@@ -1234,10 +1250,10 @@ func (c *Client) ProposeSubsystems(ctx context.Context, archContext, fileTree st
 Each subsystem is a logical grouping of functionality that maps to real files in the codebase.
 
 Rules:
-- Propose 3-5 subsystems, ordered by importance (fewer is better — only the most interesting)
+- Propose 5-8 subsystems, ordered by importance (fewer is better — only the most interesting)
 - Focus on things a developer would need to explain in an interview
 - Prioritize: core architecture, interesting patterns, non-obvious design decisions
-- For each subsystem, list the 1-4 most relevant source files from the file tree
+- For each subsystem, list the 1-6 most relevant source files from the file tree
 
 Output format (EXACTLY this, nothing else):
 slug — description
@@ -1324,8 +1340,8 @@ slug — description
 		proposals = append(proposals, SubsystemProposal{Slug: slug, Desc: desc, Files: files})
 	}
 
-	if len(proposals) > 6 {
-		proposals = proposals[:6]
+	if len(proposals) > 9 {
+		proposals = proposals[:9]
 	}
 	return proposals, nil
 }
@@ -1486,7 +1502,11 @@ Rules:
 	}
 	prompt += fmt.Sprintf("\n\nExtract the key information from %s for the %s subsystem. Build on the notes above — reference connections, add missing context, note contradictions.", fileName, subsystem)
 
-	return c.Chat(ctx, system, prompt)
+	resp, err := c.Chat(ctx, system, prompt)
+	if err != nil {
+		return "", err
+	}
+	return stripOuterFence(resp), nil
 }
 
 // GenerateProjectFromNotes creates a knowledge doc from accumulated file analysis notes.
@@ -1539,6 +1559,10 @@ Rules:
 	msgs = append(msgs, chatHistory...)
 	msgs = append(msgs, Message{Role: "user", Content: fmt.Sprintf("Here are my accumulated analysis notes from reading the source files for the %s subsystem:\n\n%s\n\nNow generate the knowledge document.", subsystem, accumulatedNotes)})
 
-	return c.ChatWithHistory(ctx, system, msgs)
+	resp, err := c.ChatWithHistory(ctx, system, msgs)
+	if err != nil {
+		return "", err
+	}
+	return stripOuterFence(resp), nil
 }
 

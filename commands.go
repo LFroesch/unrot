@@ -108,6 +108,16 @@ type projectContentMsg struct {
 	files   []string // source files that were read
 }
 
+type projectFileNotesMsg struct {
+	notes    string // accumulated notes after this file
+	fileName string
+}
+
+type projectStaleCheckMsg struct {
+	entries []projectStaleInfo
+	hasAny  bool // true if any knowledge files exist for this project
+}
+
 type errMsg struct{ err error }
 
 // --- Commands ---
@@ -752,6 +762,79 @@ func generateSubsystemCmd(ctx context.Context, client *ollama.Client, repoPath, 
 		}
 		projectLog("[%s] done (%d chars)", subsystem, len(content))
 		return projectContentMsg{content: content, files: readFiles}
+	}
+}
+
+// extractFileNotesCmd reads one source file and calls ExtractFileNotes to build running notes.
+func extractFileNotesCmd(ctx context.Context, client *ollama.Client, repoPath, subsystem, fileName, runningNotes string) tea.Cmd {
+	return func() tea.Msg {
+		data, err := os.ReadFile(filepath.Join(repoPath, fileName))
+		if err != nil {
+			projectLog("[%s] skip unreadable %s: %v", subsystem, fileName, err)
+			return projectFileNotesMsg{notes: runningNotes, fileName: fileName}
+		}
+		lines := strings.Split(string(data), "\n")
+		if len(lines) > 800 {
+			lines = lines[:800]
+		}
+		content := strings.Join(lines, "\n")
+		projectLog("[%s] extracting notes from %s (%d lines)...", subsystem, fileName, len(lines))
+
+		notes, err := client.ExtractFileNotes(ctx, fileName, content, runningNotes, subsystem)
+		if err != nil {
+			projectLog("[%s] ExtractFileNotes error for %s: %v", subsystem, fileName, err)
+			return projectFileNotesMsg{notes: runningNotes, fileName: fileName}
+		}
+		projectLog("[%s] extracted %d chars of notes from %s", subsystem, len(notes), fileName)
+		return projectFileNotesMsg{notes: notes, fileName: fileName}
+	}
+}
+
+// synthesizeSubsystemCmd generates a knowledge doc from accumulated file notes.
+func synthesizeSubsystemCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext, notes string) tea.Cmd {
+	return func() tea.Msg {
+		projectLog("[%s] synthesizing from %d chars of notes...", subsystem, len(notes))
+		content, err := client.GenerateProjectFromNotes(ctx, projectName, subsystem, archContext, notes, nil)
+		if err != nil {
+			projectLog("[%s] synthesis ERROR: %v", subsystem, err)
+			return errMsg{err}
+		}
+		projectLog("[%s] synthesized (%d chars)", subsystem, len(content))
+		return projectContentMsg{content: content}
+	}
+}
+
+// checkProjectStalenessCmd checks if existing knowledge files for a project are stale.
+func checkProjectStalenessCmd(brainPath, repoPath, projectName string) tea.Cmd {
+	return func() tea.Msg {
+		dir := filepath.Join(brainPath, "knowledge", "projects", projectName)
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) == 0 {
+			return projectStaleCheckMsg{hasAny: false}
+		}
+		var results []projectStaleInfo
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			meta := knowledge.ParseSource(string(data))
+			if meta == nil {
+				continue
+			}
+			slug := strings.TrimSuffix(e.Name(), ".md")
+			drift := getRepoCommitDrift(repoPath, meta.Commit)
+			results = append(results, projectStaleInfo{
+				slug:   slug,
+				commit: meta.Commit,
+				drift:  drift,
+				files:  meta.Files,
+			})
+		}
+		return projectStaleCheckMsg{entries: results, hasAny: len(results) > 0}
 	}
 }
 

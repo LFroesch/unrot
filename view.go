@@ -1452,6 +1452,48 @@ func (m model) renderProject() string {
 		}
 		return b.String()
 
+	case projectCheckingStale:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render(fmt.Sprintf("  Project: %s", m.projectName)))
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("  %s checking existing knowledge...", m.spinner.View()))
+		return b.String()
+
+	case projectStaleResult:
+		var b strings.Builder
+		b.WriteString(titleStyle.Render(fmt.Sprintf("  Project: %s", m.projectName)))
+		b.WriteString("\n\n")
+
+		staleCount := 0
+		freshCount := 0
+		for _, si := range m.projectStaleEntries {
+			marker := actionStyle.Render("  ✓ ")
+			drift := dimStyle.Render("up to date")
+			if si.drift != 0 {
+				staleCount++
+				marker = lipgloss.NewStyle().Foreground(colorWarn).Render("  ● ")
+				if si.drift > 0 {
+					drift = lipgloss.NewStyle().Foreground(colorWarn).Render(fmt.Sprintf("%d commits behind", si.drift))
+				} else {
+					drift = lipgloss.NewStyle().Foreground(colorWarn).Render("unknown drift")
+				}
+			} else {
+				freshCount++
+			}
+			b.WriteString(marker + si.slug + "  " + drift + "\n")
+		}
+		b.WriteString("\n")
+		if staleCount > 0 {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  %d stale, %d fresh", staleCount, freshCount)))
+			b.WriteString("\n\n")
+			b.WriteString(dimStyle.Render("  enter → re-scan stale · a → full re-scan · esc → back"))
+		} else {
+			b.WriteString(dimStyle.Render("  all subsystems up to date"))
+			b.WriteString("\n\n")
+			b.WriteString(dimStyle.Render("  a → full re-scan · esc → back"))
+		}
+		return b.String()
+
 	case projectProposing:
 		var b strings.Builder
 		b.WriteString(titleStyle.Render(fmt.Sprintf("  Project: %s", m.projectName)))
@@ -1502,7 +1544,7 @@ func (m model) renderProjectProgress() string {
 				b.WriteString("  " + dimStyle.Render(fileLabel))
 			}
 			b.WriteString("\n")
-		case "generating", "saving":
+		case "extracting", "synthesizing", "saving":
 			b.WriteString(domainStyle.Render(fmt.Sprintf("  %s ", m.spinner.View())))
 			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(e.slug))
 			if e.fileCount > 0 {
@@ -2029,6 +2071,14 @@ func (m model) renderStatus() string {
 		case projectRepoInput:
 			keys = []struct{ key, action string }{
 				{"enter", "scan repo"}, {"esc", "back"},
+			}
+		case projectCheckingStale:
+			keys = []struct{ key, action string }{
+				{"", "checking..."}, {"esc", "cancel"},
+			}
+		case projectStaleResult:
+			keys = []struct{ key, action string }{
+				{"enter", "re-scan stale"}, {"a", "full re-scan"}, {"esc", "back"},
 			}
 		case projectProposing:
 			keys = []struct{ key, action string }{
