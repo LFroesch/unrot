@@ -1221,23 +1221,30 @@ If no prerequisites, just output the difficulty line.`
 	return difficulty, connections, nil
 }
 
-// ProposeSubsystems asks ollama to suggest subsystems to document for a project.
-// archContext is the project's CLAUDE.md/README content, fileTree is the repo's file listing.
-func (c *Client) ProposeSubsystems(ctx context.Context, archContext, fileTree string) ([]string, error) {
-	system := `You are analyzing a software project to propose subsystems worth documenting.
+// SubsystemProposal is a proposed subsystem with its relevant source files.
+type SubsystemProposal struct {
+	Slug  string
+	Desc  string
+	Files []string
+}
+
+// ProposeSubsystems asks ollama to suggest subsystems with file mappings in ONE call.
+func (c *Client) ProposeSubsystems(ctx context.Context, archContext, fileTree string) ([]SubsystemProposal, error) {
+	system := `You are analyzing a software project to propose subsystems worth documenting for interview prep.
 Each subsystem is a logical grouping of functionality that maps to real files in the codebase.
 
 Rules:
 - Propose 3-5 subsystems, ordered by importance (fewer is better — only the most interesting)
-- Each line: slug — one-sentence description
-- Slug format: lowercase-hyphenated (e.g. "quiz-flow", "state-management")
 - Focus on things a developer would need to explain in an interview
-- Group by logical concern, not by file — but each subsystem should map to specific files
-- Use the file tree to identify REAL subsystems, not guesses
 - Prioritize: core architecture, interesting patterns, non-obvious design decisions
+- For each subsystem, list the 1-4 most relevant source files from the file tree
 
-Output format (one per line, nothing else):
-slug — description`
+Output format (EXACTLY this, nothing else):
+slug — description
+  files: path/to/file1, path/to/file2
+
+slug — description
+  files: path/to/file1, path/to/file2`
 
 	userMsg := "Project architecture:\n\n" + archContext
 	if fileTree != "" {
@@ -1248,16 +1255,17 @@ slug — description`
 		return nil, err
 	}
 
-	var subsystems []string
-	for _, line := range strings.Split(resp, "\n") {
-		line = strings.TrimSpace(line)
+	var proposals []SubsystemProposal
+	lines := strings.Split(resp, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
 		line = strings.TrimPrefix(line, "- ")
 		line = strings.TrimPrefix(line, "* ")
-		// Strip numbering like "1. " or "1) "
-		for i, ch := range line {
+		// Strip numbering
+		for j, ch := range line {
 			if ch == '.' || ch == ')' {
-				if i > 0 && i <= 2 {
-					line = strings.TrimSpace(line[i+1:])
+				if j > 0 && j <= 2 {
+					line = strings.TrimSpace(line[j+1:])
 				}
 				break
 			}
@@ -1265,21 +1273,21 @@ slug — description`
 				break
 			}
 		}
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(strings.ToLower(line), "files:") {
 			continue
 		}
-		// Must start with a slug (lowercase-hyphenated word before " — " or " - ")
-		// Reject lines that are just commentary sentences
-		slug := line
+
+		// Parse slug — description
+		slug, desc := line, ""
 		if idx := strings.Index(line, " — "); idx > 0 {
-			slug = line[:idx]
+			slug, desc = line[:idx], line[idx+len(" — "):]
 		} else if idx := strings.Index(line, " - "); idx > 0 {
-			slug = line[:idx]
+			slug, desc = line[:idx], line[idx+3:]
 		}
 		slug = strings.TrimSpace(slug)
-		// Valid slug: no spaces, no uppercase, has a letter
-		hasLetter := false
-		valid := true
+
+		// Validate slug
+		hasLetter, valid := false, true
 		for _, ch := range slug {
 			if ch >= 'A' && ch <= 'Z' {
 				valid = false
@@ -1296,13 +1304,30 @@ slug — description`
 		if !valid || !hasLetter {
 			continue
 		}
-		subsystems = append(subsystems, line)
+
+		// Look for files: line immediately after
+		var files []string
+		if i+1 < len(lines) {
+			nextLine := strings.TrimSpace(lines[i+1])
+			if idx := strings.Index(strings.ToLower(nextLine), "files:"); idx >= 0 {
+				fileList := strings.TrimSpace(nextLine[idx+6:])
+				for _, f := range strings.Split(fileList, ",") {
+					f = strings.TrimSpace(f)
+					if f != "" {
+						files = append(files, f)
+					}
+				}
+				i++ // skip the files line
+			}
+		}
+
+		proposals = append(proposals, SubsystemProposal{Slug: slug, Desc: desc, Files: files})
 	}
-	// Cap at 5 — more than that is too slow on small models
-	if len(subsystems) > 5 {
-		subsystems = subsystems[:5]
+
+	if len(proposals) > 6 {
+		proposals = proposals[:6]
 	}
-	return subsystems, nil
+	return proposals, nil
 }
 
 // GenerateProjectKnowledge creates a knowledge doc for a project subsystem.
@@ -1310,43 +1335,44 @@ slug — description`
 // chatHistory has any clarification conversation.
 func (c *Client) GenerateProjectKnowledge(ctx context.Context, projectName, subsystem, archContext, sourceCode string, chatHistory []Message) (string, error) {
 	system := fmt.Sprintf(`You are documenting the "%s" subsystem of the "%s" project for the developer who built it.
-The goal is to fight "I forgot how my own code works" decay. Write as if explaining to yourself in 3 months.
+The goal: prepare the developer to explain this code in a technical interview. They built it — help them articulate WHY and HOW.
 
 You have:
 1. Architecture context (CLAUDE.md/README) — the big picture
-2. Source code for this subsystem — the implementation details
-3. Any conversation clarifying what to focus on
+2. Actual source code for this subsystem — the real implementation
 
 Rules:
 - Start with: # %s — %s
-- Focus on HOW it works and WHY it was built this way
-- Include key data structures, state transitions, and control flow
-- Call out non-obvious decisions and gotchas
+- Reference specific function/type names from the source code
+- Every fact should be something an interviewer could ask about
 - Use these sections:
 
 ## Overview
 1-3 sentences: what this subsystem does and why it exists
 
-## How It Works
-- Step-by-step mechanism, data flow, key functions
-- Include code references (function names, file:line patterns)
-- Show key data structures inline
+## Architecture & Patterns
+- Name each design pattern used (state machine, fan-out, observer, etc)
+- Show WHERE it's used (specific functions/types)
+- Explain the trade-off: "X pattern because Y. Alternative was Z but that would mean..."
 
-## Design Decisions
-- Why this approach? What alternatives were considered?
-- Trade-offs accepted
+## Key Implementation Details
+- Data structures, state transitions, control flow
+- Specific function/type names with file references
+- Show key code constructs inline (brief)
+
+## Interview Angles
+- 3-5 questions an interviewer might ask about this subsystem
+- Format: "Why did you choose X over Y?" → brief answer
+- Include: scaling questions, failure mode questions, design justification
 
 ## Gotchas
-- Things that would trip you up coming back to this code
 - Edge cases, implicit assumptions, ordering dependencies
 
 ## Connections
 - requires: domain/slug (prerequisites from other knowledge files)
-- How this subsystem interacts with others
 
-- Keep it 40-80 lines — dense, specific, quizzable
-- NO markdown code fences wrapping the whole document
-- Every fact should be something worth quizzing on`, subsystem, projectName, projectName, subsystem)
+- Keep it 60-100 lines — dense, specific, quizzable
+- NO markdown code fences wrapping the whole document`, subsystem, projectName, projectName, subsystem)
 
 	msgs := make([]Message, 0, len(chatHistory)+2)
 	if archContext != "" {

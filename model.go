@@ -92,10 +92,8 @@ type projectStep int
 
 const (
 	projectRepoInput  projectStep = iota // enter repo path
-	projectProposing                     // ollama proposing subsystems (spinner)
-	projectScanning                      // ollama picking which files to read for current subsystem
-	projectProcessing                    // reading files one by one (chained)
-	projectGenerating                    // synthesizing knowledge doc from notes (spinner)
+	projectProposing                     // ollama proposing subsystems with file mappings (spinner)
+	projectGenerating                    // generating knowledge doc from source code (spinner, 1 call per subsystem)
 	projectDone                          // summary screen showing all generated files
 )
 
@@ -149,9 +147,10 @@ const (
 
 type projectBatchEntry struct {
 	slug      string
-	fileCount int    // how many source files were read
-	status    string // "pending", "scanning", "reading", "generating", "saving", "done"
-	savedPath string // final knowledge file path (set on save)
+	files     []string // source files mapped to this subsystem
+	fileCount int      // how many source files were read
+	status    string   // "pending", "generating", "saving", "done"
+	savedPath string   // final knowledge file path (set on save)
 }
 
 type chatEntry struct {
@@ -323,21 +322,18 @@ type model struct {
 
 	// Project scan mode
 	projectStep        projectStep
-	projectRepoPath    string // path to repo being analyzed
-	projectName        string // short name (last segment of repo path)
-	projectArchContext string // CLAUDE.md + README content
-	projectSubsystem   string // current subsystem slug being processed
-	projectContent     string // generated knowledge content
-	projectSourceFiles string // comma-separated list of files read for current subsystem
-	projectScanFiles   []string // files ollama picked to read
-	projectScanIdx     int      // index of file currently being processed
-	projectScanNotes   string   // accumulated notes from processed files
-	projectScanStatus  string   // "reading model.go (2/4)..." for display
+	projectRepoPath    string    // path to repo being analyzed
+	projectName        string    // short name (last segment of repo path)
+	projectArchContext string    // CLAUDE.md + README content
+	projectSubsystem   string    // current subsystem slug being processed
+	projectContent     string    // generated knowledge content
+	projectSourceFiles string    // comma-separated list of files read for current subsystem
+	projectScanStatus  string    // status text for display
 	projectStartTime   time.Time // when scan started (for elapsed timer)
 
-	// Batch pipeline (auto-generates all subsystems)
-	projectBatchQueue   []string             // remaining subsystem slugs to process
-	projectBatchEntries []projectBatchEntry  // all subsystems with status for progress display
+	// Batch pipeline (auto-generates all subsystems, 1 ollama call each)
+	projectBatchQueue   []string            // remaining subsystem slugs to process
+	projectBatchEntries []projectBatchEntry // all subsystems with status for progress display
 
 	// Daily goal
 	dailyGoal int

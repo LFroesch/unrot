@@ -94,12 +94,18 @@ type challengeChatMsg struct{ text string }
 
 type clipboardMsg struct{ ok bool }
 
-type projectSubsystemsMsg struct{ subsystems []string }
-type projectContentMsg struct{ content string }
-type projectFilesMsg struct{ files []string }
-type projectFileProcessedMsg struct {
-	notes   string
-	fileIdx int
+type projectSubsystemsMsg struct {
+	proposals []projectProposal
+}
+
+type projectProposal struct {
+	slug  string
+	desc  string
+	files []string
+}
+type projectContentMsg struct {
+	content string
+	files   []string // source files that were read
 }
 
 type errMsg struct{ err error }
@@ -652,34 +658,16 @@ func enrichFileCmd(ctx context.Context, client *ollama.Client, brainPath, indexC
 
 // --- Project Scan Commands ---
 
-func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, archContext, fileTree string) tea.Cmd {
+func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, repoPath, archContext, fileTree string) tea.Cmd {
 	return func() tea.Msg {
 		projectLog("proposing subsystems...")
-		subs, err := client.ProposeSubsystems(ctx, archContext, fileTree)
-		if err != nil {
-			return errMsg{err}
-		}
-		projectLog("proposed %d subsystems: %v", len(subs), subs)
-		return projectSubsystemsMsg{subsystems: subs}
-	}
-}
-
-// suggestFilesCmd asks ollama which source files to read for a subsystem.
-func suggestFilesCmd(ctx context.Context, client *ollama.Client, repoPath, archContext, subsystem string, chatHistory []chatEntry) tea.Cmd {
-	return func() tea.Msg {
-		projectLog("[%s] asking ollama to pick files...", subsystem)
-		tree := listRepoTree(repoPath)
-		msgs := make([]ollama.Message, len(chatHistory))
-		for i, h := range chatHistory {
-			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
-		}
-		files, err := client.SuggestFiles(ctx, tree, archContext, subsystem, msgs)
+		proposals, err := client.ProposeSubsystems(ctx, archContext, fileTree)
 		if err != nil {
 			return errMsg{err}
 		}
 
-		// Build a set of all real files for fuzzy matching
-		treeFiles := strings.Split(tree, "\n")
+		// Validate file paths exist, with fuzzy fallback
+		treeFiles := strings.Split(fileTree, "\n")
 		byBasename := make(map[string][]string)
 		for _, tf := range treeFiles {
 			tf = strings.TrimSpace(tf)
@@ -688,115 +676,82 @@ func suggestFilesCmd(ctx context.Context, client *ollama.Client, repoPath, archC
 			}
 		}
 
-		// Validate files exist, with fallback strategies
-		seen := make(map[string]bool)
-		var valid []string
-		addIfExists := func(f string) bool {
-			if seen[f] {
-				return false
-			}
-			abs := filepath.Join(repoPath, f)
-			if _, err := os.Stat(abs); err == nil {
-				seen[f] = true
-				valid = append(valid, f)
-				return true
-			}
-			return false
-		}
-		for _, f := range files {
-			if addIfExists(f) {
-				continue
-			}
-			// Try stripping a leading directory (ollama often prepends repo name)
-			if idx := strings.IndexByte(f, '/'); idx >= 0 {
-				if addIfExists(f[idx+1:]) {
+		var result []projectProposal
+		for _, p := range proposals {
+			var valid []string
+			seen := make(map[string]bool)
+			for _, f := range p.Files {
+				f = strings.TrimSpace(f)
+				abs := filepath.Join(repoPath, f)
+				if _, err := os.Stat(abs); err == nil && !seen[f] {
+					seen[f] = true
+					valid = append(valid, f)
 					continue
 				}
+				// Strip leading dir (ollama often prepends repo name)
+				if idx := strings.IndexByte(f, '/'); idx >= 0 {
+					stripped := f[idx+1:]
+					abs = filepath.Join(repoPath, stripped)
+					if _, err := os.Stat(abs); err == nil && !seen[stripped] {
+						seen[stripped] = true
+						valid = append(valid, stripped)
+						continue
+					}
+				}
+				// Basename fallback
+				base := filepath.Base(f)
+				if matches, ok := byBasename[base]; ok && len(matches) == 1 && !seen[matches[0]] {
+					seen[matches[0]] = true
+					valid = append(valid, matches[0])
+				}
 			}
-			// Basename fallback — if unique match in tree
-			base := filepath.Base(f)
-			if matches, ok := byBasename[base]; ok && len(matches) == 1 {
-				addIfExists(matches[0])
-			}
+			result = append(result, projectProposal{slug: p.Slug, desc: p.Desc, files: valid})
+			projectLog("  %s — %d files: %v", p.Slug, len(valid), valid)
 		}
-		if len(valid) == 0 {
-			projectLog("[%s] no valid files found, skipping", subsystem)
-			return errMsg{fmt.Errorf("no source files found for %s subsystem", subsystem)}
-		}
-		// Cap at 3 files per subsystem to keep ollama calls manageable on small models
-		if len(valid) > 3 {
-			valid = valid[:3]
-		}
-		projectLog("[%s] selected %d files: %v", subsystem, len(valid), valid)
-		return projectFilesMsg{files: valid}
+		projectLog("proposed %d subsystems", len(result))
+		return projectSubsystemsMsg{proposals: result}
 	}
 }
 
-// processFileCmd reads a single source file and extracts notes, chaining with accumulated context.
-func processFileCmd(ctx context.Context, client *ollama.Client, repoPath string, files []string, idx int, runningNotes, subsystem string) tea.Cmd {
+// generateSubsystemCmd reads source files from disk and generates a knowledge doc in ONE ollama call.
+func generateSubsystemCmd(ctx context.Context, client *ollama.Client, repoPath, projectName, subsystem, archContext string, files []string) tea.Cmd {
 	return func() tea.Msg {
-		f := files[idx]
-		projectLog("[%s] reading %s (%d/%d)...", subsystem, f, idx+1, len(files))
-		data, err := os.ReadFile(filepath.Join(repoPath, f))
-		if err != nil {
-			projectLog("[%s] ERROR reading %s: %v", subsystem, f, err)
-			// Skip unreadable files, pass notes through
-			return projectFileProcessedMsg{notes: runningNotes, fileIdx: idx}
-		}
-
-		content := string(data)
-		lines := strings.Split(content, "\n")
-
-		// Cap very large files to avoid excessive ollama calls
-		const maxLines = 1500
-		if len(lines) > maxLines {
-			lines = lines[:maxLines]
-			content = strings.Join(lines, "\n")
-		}
-
-		// If file is large, chunk it — process in ~600 line chunks, accumulating notes per chunk
-		const chunkSize = 600
-		if len(lines) > chunkSize {
-			chunkNotes := runningNotes
-			for start := 0; start < len(lines); start += chunkSize {
-				end := start + chunkSize
-				if end > len(lines) {
-					end = len(lines)
-				}
-				chunkLabel := fmt.Sprintf("%s (lines %d-%d)", f, start+1, end)
-				chunk := strings.Join(lines[start:end], "\n")
-				extracted, err := client.ExtractFileNotes(ctx, chunkLabel, chunk, chunkNotes, subsystem)
-				if err != nil {
-					break
-				}
-				chunkNotes = extracted
+		// Read and concatenate source files — no ollama needed for reading
+		var source strings.Builder
+		var readFiles []string
+		const maxTotalLines = 2000 // fits comfortably in 32K context with prompt overhead
+		totalLines := 0
+		for _, f := range files {
+			data, err := os.ReadFile(filepath.Join(repoPath, f))
+			if err != nil {
+				projectLog("[%s] skip unreadable %s: %v", subsystem, f, err)
+				continue
 			}
-			return projectFileProcessedMsg{notes: chunkNotes, fileIdx: idx}
+			lines := strings.Split(string(data), "\n")
+			// Truncate individual files at 800 lines
+			if len(lines) > 800 {
+				lines = lines[:800]
+			}
+			// Stop if we'd exceed total budget
+			if totalLines+len(lines) > maxTotalLines && totalLines > 0 {
+				projectLog("[%s] truncating at %d lines (skipping %s)", subsystem, totalLines, f)
+				break
+			}
+			fmt.Fprintf(&source, "\n--- %s ---\n%s\n", f, strings.Join(lines, "\n"))
+			readFiles = append(readFiles, f)
+			totalLines += len(lines)
 		}
 
-		notes, err := client.ExtractFileNotes(ctx, f, content, runningNotes, subsystem)
-		if err != nil {
-			return projectFileProcessedMsg{notes: runningNotes, fileIdx: idx}
-		}
-		return projectFileProcessedMsg{notes: notes, fileIdx: idx}
-	}
-}
+		sourceCode := source.String()
+		projectLog("[%s] generating from %d files (%d lines)...", subsystem, len(readFiles), totalLines)
 
-// generateProjectFromNotesCmd synthesizes a knowledge doc from accumulated file notes.
-func generateProjectFromNotesCmd(ctx context.Context, client *ollama.Client, projectName, subsystem, archContext, notes string, chatHistory []chatEntry) tea.Cmd {
-	return func() tea.Msg {
-		projectLog("[%s] synthesizing knowledge doc from notes (%d chars)...", subsystem, len(notes))
-		msgs := make([]ollama.Message, len(chatHistory))
-		for i, h := range chatHistory {
-			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
-		}
-		content, err := client.GenerateProjectFromNotes(ctx, projectName, subsystem, archContext, notes, msgs)
+		content, err := client.GenerateProjectKnowledge(ctx, projectName, subsystem, archContext, sourceCode, nil)
 		if err != nil {
-			projectLog("[%s] ERROR synthesizing: %v", subsystem, err)
+			projectLog("[%s] ERROR: %v", subsystem, err)
 			return errMsg{err}
 		}
-		projectLog("[%s] doc generated (%d chars)", subsystem, len(content))
-		return projectContentMsg{content: content}
+		projectLog("[%s] done (%d chars)", subsystem, len(content))
+		return projectContentMsg{content: content, files: readFiles}
 	}
 }
 

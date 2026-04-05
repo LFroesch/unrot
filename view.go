@@ -1461,7 +1461,7 @@ func (m model) renderProject() string {
 		b.WriteString(dimStyle.Render("  reading file tree and identifying subsystems"))
 		return b.String()
 
-	case projectScanning, projectProcessing, projectGenerating:
+	case projectGenerating:
 		return m.renderProjectProgress()
 
 	case projectDone:
@@ -1502,32 +1502,14 @@ func (m model) renderProjectProgress() string {
 				b.WriteString("  " + dimStyle.Render(fileLabel))
 			}
 			b.WriteString("\n")
-		case "scanning", "reading", "generating", "saving":
+		case "generating", "saving":
 			b.WriteString(domainStyle.Render(fmt.Sprintf("  %s ", m.spinner.View())))
 			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorText).Render(e.slug))
-			b.WriteString("\n")
-			// Show detail for active subsystem
-			if m.projectStep == projectProcessing && len(m.projectScanFiles) > 0 {
-				// Per-file progress bar
-				total := len(m.projectScanFiles)
-				done := m.projectScanIdx
-				filled := barFilledStyle.Render(strings.Repeat("█", done))
-				empty := barEmptyStyle.Render(strings.Repeat("░", total-done))
-				b.WriteString(fmt.Sprintf("      [%s%s] %d/%d files\n", filled, empty, done, total))
-				// File list
-				for i, f := range m.projectScanFiles {
-					base := filepath.Base(f)
-					if i < done {
-						b.WriteString(actionStyle.Render("      ✓ ") + dimStyle.Render(base) + "\n")
-					} else if i == done {
-						b.WriteString(domainStyle.Render("      → ") + base + "\n")
-					} else {
-						b.WriteString(dimStyle.Render("        " + base) + "\n")
-					}
-				}
-			} else {
-				b.WriteString("      " + dimStyle.Render(m.projectScanStatus) + "\n")
+			if e.fileCount > 0 {
+				b.WriteString("  " + dimStyle.Render(fmt.Sprintf("%d files", e.fileCount)))
 			}
+			b.WriteString("\n")
+			b.WriteString("      " + dimStyle.Render(m.projectScanStatus) + "\n")
 		default: // pending
 			b.WriteString(dimStyle.Render("    " + e.slug) + "\n")
 		}
@@ -2052,7 +2034,7 @@ func (m model) renderStatus() string {
 			keys = []struct{ key, action string }{
 				{"", "analyzing..."}, {"esc", "cancel"},
 			}
-		case projectScanning, projectProcessing, projectGenerating:
+		case projectGenerating:
 			keys = []struct{ key, action string }{
 				{"", m.projectScanStatus}, {"esc", "cancel"},
 			}

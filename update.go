@@ -244,83 +244,51 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case projectSubsystemsMsg:
-		// Auto-start batch pipeline for ALL subsystems
-		slugs := make([]string, 0, len(msg.subsystems))
-		entries := make([]projectBatchEntry, 0, len(msg.subsystems))
-		for _, s := range msg.subsystems {
-			slug := s
-			if idx := strings.Index(s, " — "); idx > 0 {
-				slug = s[:idx]
-			} else if idx := strings.Index(s, " - "); idx > 0 {
-				slug = s[:idx]
-			}
-			slug = strings.TrimSpace(slug)
-			slugs = append(slugs, slug)
-			entries = append(entries, projectBatchEntry{slug: slug, status: "pending"})
-		}
-		if len(slugs) == 0 {
+		if len(msg.proposals) == 0 {
 			m.toast = "no subsystems proposed — try a repo with more code"
 			m.goHome()
 			return m, nil
 		}
+		// Build batch entries from proposals (file mappings already resolved)
+		entries := make([]projectBatchEntry, len(msg.proposals))
+		for i, p := range msg.proposals {
+			entries[i] = projectBatchEntry{
+				slug:      p.slug,
+				fileCount: len(p.files),
+				files:     p.files,
+				status:    "pending",
+			}
+		}
 		m.projectBatchEntries = entries
-		m.projectSubsystem = slugs[0]
-		m.projectBatchQueue = slugs[1:]
-		m.projectBatchEntries[0].status = "scanning"
-		m.projectScanNotes = ""
-		m.projectScanFiles = nil
-		m.projectSourceFiles = ""
-		m.projectStep = projectScanning
-		m.projectScanStatus = fmt.Sprintf("scanning files for %s...", slugs[0])
-		projectLog("batch start: %s — %d subsystems: %v", m.projectName, len(slugs), slugs)
-		return m, suggestFilesCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectArchContext, slugs[0], nil)
+		// Start first subsystem
+		first := entries[0]
+		m.projectSubsystem = first.slug
+		if len(entries) > 1 {
+			m.projectBatchQueue = nil
+			for _, e := range entries[1:] {
+				m.projectBatchQueue = append(m.projectBatchQueue, e.slug)
+			}
+		}
+		m.projectBatchEntries[0].status = "generating"
+		m.projectStep = projectGenerating
+		m.projectScanStatus = fmt.Sprintf("generating %s...", first.slug)
+		projectLog("batch start: %s — %d subsystems", m.projectName, len(entries))
+		return m, generateSubsystemCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectName, first.slug, m.projectArchContext, first.files)
 
 	case projectContentMsg:
 		m.projectContent = msg.content
-		// Update batch entry status
+		// Update batch entry
 		for i := range m.projectBatchEntries {
 			if m.projectBatchEntries[i].slug == m.projectSubsystem {
 				m.projectBatchEntries[i].status = "saving"
+				if len(msg.files) > 0 {
+					m.projectBatchEntries[i].fileCount = len(msg.files)
+				}
 			}
 		}
+		m.projectSourceFiles = strings.Join(msg.files, ", ")
 		projectLog("generated doc for %s, auto-saving...", m.projectSubsystem)
 		return m, batchSaveKnowledgeCmd(m.brainPath, m.projectRepoPath, m.projectName, m.projectSubsystem, msg.content, m.projectSourceFiles)
-
-	case projectFilesMsg:
-		m.projectScanFiles = msg.files
-		m.projectScanIdx = 0
-		m.projectScanNotes = ""
-		m.projectSourceFiles = strings.Join(msg.files, ", ")
-		m.projectStep = projectProcessing
-		m.projectScanStatus = fmt.Sprintf("reading %s (1/%d)...", filepath.Base(msg.files[0]), len(msg.files))
-		for i := range m.projectBatchEntries {
-			if m.projectBatchEntries[i].slug == m.projectSubsystem {
-				m.projectBatchEntries[i].status = "reading"
-				m.projectBatchEntries[i].fileCount = len(msg.files)
-			}
-		}
-		projectLog("[%s] files selected (%d): %v", m.projectSubsystem, len(msg.files), msg.files)
-		return m, processFileCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectScanFiles, 0, "", m.projectSubsystem)
-
-	case projectFileProcessedMsg:
-		m.projectScanNotes = msg.notes
-		next := msg.fileIdx + 1
-		if next < len(m.projectScanFiles) {
-			m.projectScanIdx = next
-			m.projectScanStatus = fmt.Sprintf("reading %s (%d/%d)...", filepath.Base(m.projectScanFiles[next]), next+1, len(m.projectScanFiles))
-			projectLog("[%s] processed %s (%d/%d)", m.projectSubsystem, filepath.Base(m.projectScanFiles[msg.fileIdx]), msg.fileIdx+1, len(m.projectScanFiles))
-			return m, processFileCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectScanFiles, next, m.projectScanNotes, m.projectSubsystem)
-		}
-		// All files processed — synthesize into knowledge doc
-		projectLog("[%s] all files processed, synthesizing doc...", m.projectSubsystem)
-		m.projectStep = projectGenerating
-		m.projectScanStatus = "synthesizing knowledge doc..."
-		for i := range m.projectBatchEntries {
-			if m.projectBatchEntries[i].slug == m.projectSubsystem {
-				m.projectBatchEntries[i].status = "generating"
-			}
-		}
-		return m, generateProjectFromNotesCmd(m.ollamaCtx, m.ollama, m.projectName, m.projectSubsystem, m.projectArchContext, m.projectScanNotes, nil)
 
 	case learnContentMsg:
 		m.learnContent = msg.content
@@ -370,17 +338,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.projectBatchQueue = m.projectBatchQueue[1:]
 				m.projectSubsystem = next
 				m.projectSourceFiles = ""
-				m.projectScanNotes = ""
-				m.projectScanFiles = nil
-				m.projectStep = projectScanning
-				m.projectScanStatus = fmt.Sprintf("scanning files for %s...", next)
+				m.projectStep = projectGenerating
+				m.projectScanStatus = fmt.Sprintf("generating %s...", next)
+				// Find files for this subsystem from batch entries
+				var nextFiles []string
 				for i := range m.projectBatchEntries {
 					if m.projectBatchEntries[i].slug == next {
-						m.projectBatchEntries[i].status = "scanning"
+						m.projectBatchEntries[i].status = "generating"
+						nextFiles = m.projectBatchEntries[i].files
 					}
 				}
 				projectLog("starting next subsystem: %s (%d remaining)", next, len(m.projectBatchQueue))
-				return m, suggestFilesCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectArchContext, next, nil)
+				return m, generateSubsystemCmd(m.ollamaCtx, m.ollama, m.projectRepoPath, m.projectName, next, m.projectArchContext, nextFiles)
 			}
 			// All done
 			doneCount := len(m.projectBatchEntries)
@@ -1114,8 +1083,6 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 		m.projectContent = ""
 		m.projectBatchQueue = nil
 		m.projectBatchEntries = nil
-		m.projectScanFiles = nil
-		m.projectScanNotes = ""
 		m.projectSourceFiles = ""
 		m.phase = phaseProject
 		return m, nil
@@ -2684,7 +2651,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.projectStartTime = time.Now()
 			m.projectStep = projectProposing
 			tree := listRepoTree(raw)
-			return m, proposeSubsystemsCmd(m.ollamaCtx, m.ollama, m.projectArchContext, tree)
+			return m, proposeSubsystemsCmd(m.ollamaCtx, m.ollama, raw, m.projectArchContext, tree)
 		default:
 			var cmd tea.Cmd
 			m.learnTA, cmd = m.learnTA.Update(msg)
@@ -2701,7 +2668,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		return m, nil
 
-	case projectScanning, projectProcessing, projectGenerating:
+	case projectGenerating:
 		// Cancel batch and go home
 		if key == "esc" {
 			m.goHome()
