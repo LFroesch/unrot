@@ -723,48 +723,6 @@ func proposeSubsystemsCmd(ctx context.Context, client *ollama.Client, repoPath, 
 	}
 }
 
-// generateSubsystemCmd reads source files from disk and generates a knowledge doc in ONE ollama call.
-func generateSubsystemCmd(ctx context.Context, client *ollama.Client, repoPath, projectName, subsystem, archContext string, files []string) tea.Cmd {
-	return func() tea.Msg {
-		// Read and concatenate source files — no ollama needed for reading
-		var source strings.Builder
-		var readFiles []string
-		const maxTotalLines = 2000 // fits comfortably in 32K context with prompt overhead
-		totalLines := 0
-		for _, f := range files {
-			data, err := os.ReadFile(filepath.Join(repoPath, f))
-			if err != nil {
-				projectLog("[%s] skip unreadable %s: %v", subsystem, f, err)
-				continue
-			}
-			lines := strings.Split(string(data), "\n")
-			// Truncate individual files at 800 lines
-			if len(lines) > 800 {
-				lines = lines[:800]
-			}
-			// Stop if we'd exceed total budget
-			if totalLines+len(lines) > maxTotalLines && totalLines > 0 {
-				projectLog("[%s] truncating at %d lines (skipping %s)", subsystem, totalLines, f)
-				break
-			}
-			fmt.Fprintf(&source, "\n--- %s ---\n%s\n", f, strings.Join(lines, "\n"))
-			readFiles = append(readFiles, f)
-			totalLines += len(lines)
-		}
-
-		sourceCode := source.String()
-		projectLog("[%s] generating from %d files (%d lines)...", subsystem, len(readFiles), totalLines)
-
-		content, err := client.GenerateProjectKnowledge(ctx, projectName, subsystem, archContext, sourceCode, nil)
-		if err != nil {
-			projectLog("[%s] ERROR: %v", subsystem, err)
-			return errMsg{err}
-		}
-		projectLog("[%s] done (%d chars)", subsystem, len(content))
-		return projectContentMsg{content: content, files: readFiles}
-	}
-}
-
 // extractFileNotesCmd reads one source file and calls ExtractFileNotes to build running notes.
 func extractFileNotesCmd(ctx context.Context, client *ollama.Client, repoPath, subsystem, fileName, runningNotes string) tea.Cmd {
 	return func() tea.Msg {
@@ -876,10 +834,17 @@ func listRepoTree(repoPath string) string {
 	return strings.Join(files, "\n")
 }
 
-// readProjectContext reads CLAUDE.md and README.md from a repo directory.
+// readProjectContext reads common project documentation files from a repo directory.
+// Tries standard names in priority order: architecture/agent docs, readmes, contributing guides, build configs.
 func readProjectContext(repoPath string) string {
+	candidates := []string{
+		"CLAUDE.md", "AGENTS.md", "COPILOT.md", "CURSOR.md", // AI agent docs
+		"README.md", "README.rst", "README.txt", "README",   // readmes
+		"CONTRIBUTING.md", "ARCHITECTURE.md", "DESIGN.md",    // project docs
+		"Makefile", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", // build/infra
+	}
 	var parts []string
-	for _, name := range []string{"CLAUDE.md", "README.md"} {
+	for _, name := range candidates {
 		data, err := os.ReadFile(filepath.Join(repoPath, name))
 		if err == nil {
 			parts = append(parts, fmt.Sprintf("--- %s ---\n%s", name, string(data)))

@@ -444,7 +444,8 @@ func (m model) renderDashboard() string {
 	actions := []struct{ key, name, desc string }{
 		{"r", "review", "priority-ordered"},
 		{"F", "focused", fmt.Sprintf("favorites (%d)", favCount)},
-		{"i", "challenge", "interview prep"},
+		{"i", "challenge", "coding exercises"},
+		{"I", "interview", "project quiz"},
 		{"b", "browse", "pick a topic"},
 		{"l", "learn", "new topic"},
 		{"v", "viewer", "browse files"},
@@ -1973,7 +1974,7 @@ func (m model) renderStatus() string {
 	switch m.phase {
 	case phaseDashboard:
 		keys = []struct{ key, action string }{
-			{"enter/r", "review"}, {"F", "focused"}, {"R", "recent"}, {"i", "challenge"}, {"p", "project"}, {"v", "viewer"}, {"tab", "domain"}, {"b", "topics"}, {"l", "learn"}, {"s", "settings"}, {"a", "stats"}, {"q", "quit"},
+			{"enter/r", "review"}, {"F", "focused"}, {"R", "recent"}, {"i", "challenge"}, {"I", "interview"}, {"p", "project"}, {"v", "viewer"}, {"tab", "domain"}, {"b", "topics"}, {"l", "learn"}, {"s", "settings"}, {"a", "stats"}, {"q", "quit"},
 		}
 	case phaseRecent:
 		keys = []struct{ key, action string }{

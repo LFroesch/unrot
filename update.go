@@ -644,6 +644,10 @@ func (m *model) goHome() {
 	m.phase = phaseDashboard
 	m.domainFilter = m.cliDomain
 	m.activeOverlay = overlayNone
+	if m.savedActiveTypes != nil {
+		m.activeTypes = m.savedActiveTypes
+		m.savedActiveTypes = nil
+	}
 }
 
 // resetAnswerTA restores the answer textarea to default quiz state.
@@ -1093,6 +1097,34 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 		m.learnTA.Focus()
 		m.phase = phaseChallenge
 		return m, nil
+	case "I":
+		// Interview mode: review all project knowledge files with decision/architecture/refactor types only.
+		projectFiles := make([]string, 0)
+		for _, f := range m.allFiles {
+			if knowledge.IsProjectDomain(knowledge.Domain(f)) {
+				projectFiles = append(projectFiles, f)
+			}
+		}
+		if len(projectFiles) == 0 {
+			m.queueAlert(alertHint, "No project knowledge files found. Run project scan first (p).")
+			return m, m.flushAlerts(nil)
+		}
+		// Save current types and restrict to the 3 project-focused types.
+		m.savedActiveTypes = make([]bool, len(m.activeTypes))
+		copy(m.savedActiveTypes, m.activeTypes)
+		interviewTypes := map[ollama.QuestionType]bool{
+			ollama.TypeDecision:     true,
+			ollama.TypeArchitecture: true,
+			ollama.TypeRefactor:     true,
+		}
+		for i, t := range ollama.AllTypes {
+			m.activeTypes[i] = interviewTypes[t]
+		}
+		m.reviewFiles = m.applyReviewQueuePipeline(projectFiles)
+		m.resetSession()
+		m.pickMode = false
+		m.phase = phaseQuiz
+		return m, m.startFile(m.reviewFiles[0])
 	case "s":
 		m.phase = phaseSettings
 		m.settingsCursor = 0

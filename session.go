@@ -81,6 +81,9 @@ func (m *model) applyReviewQueuePipeline(files []string) []string {
 // rebuildReviewFileQueue rebuilds the capped review list after maxQuestions grows (continue session).
 func (m *model) rebuildReviewFileQueue() []string {
 	files := m.allFiles
+	if m.domainFilter == "" || !knowledge.IsProjectDomain(m.domainFilter) {
+		files = nonProjectFiles(files)
+	}
 	if m.domainFilter != "" {
 		files = knowledge.FilterByDomain(files, m.domainFilter)
 	}
@@ -103,9 +106,25 @@ func (m *model) extendSessionContinue() tea.Cmd {
 	return m.nextQuestion()
 }
 
+// nonProjectFiles returns all files excluding project knowledge (projects/ domain).
+// Project files are only quizzable via interview mode (I) or direct drill.
+func nonProjectFiles(files []string) []string {
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		if !knowledge.IsProjectDomain(knowledge.Domain(f)) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // startReview begins a priority-ordered review session.
 func (m *model) startReview() tea.Cmd {
 	files := m.allFiles
+	// Exclude project files from normal review — use interview mode (I) for those.
+	if m.domainFilter == "" || !knowledge.IsProjectDomain(m.domainFilter) {
+		files = nonProjectFiles(files)
+	}
 	if m.domainFilter != "" {
 		files = knowledge.FilterByDomain(files, m.domainFilter)
 		if len(files) == 0 {
@@ -340,14 +359,16 @@ func (m *model) applyDifficultyGating(files []string) []string {
 	}
 
 	// Determine readiness: medium unlocked when easy avg >= 3; hard when medium avg >= 3.
+	// If no files exist at the lower tier in this domain, treat the tier as unlocked
+	// (avoids permanently deferring project files which have no "easy" tier).
 	unlocked := func(dom, diff string) bool {
 		switch diff {
 		case "easy":
 			return true
 		case "medium":
-			return avgTier(dom, "easy") >= 3.0
+			return len(tierConf[tierKey{dom, "easy"}]) == 0 || avgTier(dom, "easy") >= 3.0
 		case "hard":
-			return avgTier(dom, "medium") >= 3.0
+			return len(tierConf[tierKey{dom, "medium"}]) == 0 || avgTier(dom, "medium") >= 3.0
 		}
 		return true
 	}

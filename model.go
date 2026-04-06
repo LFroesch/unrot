@@ -244,8 +244,9 @@ type model struct {
 	domainCursorPrev int      // saved cursor before overlay opens (for esc revert)
 
 	// Question type picker
-	typeCursor  int
-	activeTypes []bool // which types are enabled (indexed by AllTypes)
+	typeCursor       int
+	activeTypes      []bool // which types are enabled (indexed by AllTypes)
+	savedActiveTypes []bool // non-nil when interview mode overrode activeTypes
 
 	// Settings page
 	settingsCursor  int
