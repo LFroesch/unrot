@@ -3,3 +3,4 @@ Makefile
 WORK.md
 agent_spec.md
 unrot
+.claude/
