@@ -74,6 +74,9 @@ func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "loading..."
 	}
+	if m.showHelp {
+		return m.renderHelp()
+	}
 
 	// Terminal too small warning
 	if m.width < minTerminalWidth || m.height < minTerminalHeight {
@@ -1056,9 +1059,9 @@ func (m model) renderChallengeChat() string {
 
 	if m.challengeChatLoading {
 		b.WriteString("  " + m.spinner.View() + " thinking...\n")
-	} else if m.chatStreamKind == "challenge" && m.chatStreamBuf.Len() > 0 {
+	} else if m.chatStreamKind == "challenge" && m.chatStreamBuf != "" {
 		b.WriteString("  🤖\n")
-		b.WriteString(renderExplanation(m.chatStreamBuf.String(), w))
+		b.WriteString(renderExplanation(m.chatStreamBuf, w))
 		b.WriteString("\n")
 	} else {
 		b.WriteString("  " + m.learnTA.View())
@@ -1328,10 +1331,10 @@ func (m model) buildChatContent(w int) string {
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(2).Foreground(colorDim).Render("🤖 " + m.spinner.View() + " thinking..."))
 		b.WriteString("\n")
-	} else if m.chatStreamKind == "concept" && m.chatStreamBuf.Len() > 0 {
+	} else if m.chatStreamKind == "concept" && m.chatStreamBuf != "" {
 		b.WriteString("\n")
 		b.WriteString("  🤖\n")
-		b.WriteString(renderExplanation(m.chatStreamBuf.String(), w))
+		b.WriteString(renderExplanation(m.chatStreamBuf, w))
 		b.WriteString("\n")
 	}
 
@@ -1410,9 +1413,9 @@ func (m model) renderLearnChat() string {
 
 	if m.learnChatLoading {
 		b.WriteString("  " + m.spinner.View() + " thinking...\n")
-	} else if m.chatStreamKind == "learn" && m.chatStreamBuf.Len() > 0 {
+	} else if m.chatStreamKind == "learn" && m.chatStreamBuf != "" {
 		b.WriteString("  🤖\n")
-		b.WriteString(renderExplanation(m.chatStreamBuf.String(), w))
+		b.WriteString(renderExplanation(m.chatStreamBuf, w))
 		b.WriteString("\n")
 	} else {
 		b.WriteString("  " + m.learnTA.View())
@@ -2282,4 +2285,37 @@ func (m model) learnStatusKeys() []struct{ key, action string } {
 		}
 	}
 	return nil
+}
+
+func (m model) renderHelp() string {
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorPrimary).
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	keys := []struct{ key, desc string }{
+		{"j/k, ↑/↓", "Navigate"},
+		{"enter", "Select / answer"},
+		{"e", "Explain more"},
+		{"n", "Next question"},
+		{"tab", "Switch domain"},
+		{"esc/q", "Back"},
+		{"?", "Toggle this help"},
+		{"ctrl+c", "Quit immediately"},
+	}
+
+	var lines []string
+	lines = append(lines, titleStyle.Render("unrot — Help"))
+	lines = append(lines, "")
+	for _, k := range keys {
+		lines = append(lines, fmt.Sprintf("  %s  %s",
+			keyStyle.Render(fmt.Sprintf("%-16s", k.key)), k.desc))
+	}
+	lines = append(lines, "")
+	lines = append(lines, dimStyle.Render("Press ?, q, or esc to close"))
+
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		box.Render(strings.Join(lines, "\n")))
 }

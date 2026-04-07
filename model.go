@@ -290,7 +290,7 @@ type model struct {
 	// Streaming state shared across concept/learn/challenge chats
 	chatStreamKind string // "concept", "learn", "challenge" — empty when idle
 	chatStreamCh   <-chan ollama.StreamChunk
-	chatStreamBuf  strings.Builder
+	chatStreamBuf  string
 
 	// Explain-more inline loading
 	explainLoading bool
@@ -394,6 +394,7 @@ type model struct {
 	width    int
 	height   int
 	err      error
+	showHelp bool
 }
 
 // Bubbleup alert type keys
@@ -486,6 +487,7 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 		sessionRecordIdx: -1,
 		activeTypes:      allOn,
 		sessionMinConf:   6, // higher than max so first rating always sets it
+		chatStreamBuf:    "",
 	}
 }
 

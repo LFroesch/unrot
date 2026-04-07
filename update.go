@@ -246,7 +246,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatStreamStartedMsg:
 		m.chatStreamKind = msg.kind
 		m.chatStreamCh = msg.ch
-		m.chatStreamBuf.Reset()
+		m.chatStreamBuf = ""
 		switch msg.kind {
 		case "concept":
 			m.conceptChatLoading = false
@@ -263,12 +263,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.chatStreamKind = ""
-			m.chatStreamBuf.Reset()
+			m.chatStreamBuf = ""
 			return m, func() tea.Msg { return errMsg{msg.err} }
 		}
 		if msg.done {
-			text := m.chatStreamBuf.String()
-			m.chatStreamBuf.Reset()
+			text := m.chatStreamBuf
+			m.chatStreamBuf = ""
 			m.chatStreamKind = ""
 			switch msg.kind {
 			case "concept":
@@ -285,7 +285,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		m.chatStreamBuf.WriteString(msg.text)
+		m.chatStreamBuf += msg.text
+		if msg.kind == "concept" {
+			if m.activeOverlay == overlayChat {
+				m.syncOverlayViewport()
+			} else if m.questionTab == qTabChat {
+				m.syncQuestionChatViewport()
+			}
+		}
 		return m, listenForChatChunk(msg.kind, m.chatStreamCh)
 
 	case projectStaleCheckMsg:
@@ -1051,6 +1058,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state.Save()
 		}
 		return m, tea.Quit
+	}
+
+	if key == "?" {
+		m.showHelp = !m.showHelp
+		return m, nil
+	}
+	if m.showHelp {
+		if key == "esc" || key == "q" {
+			m.showHelp = false
+		}
+		return m, nil
 	}
 
 	// Overlay keys take priority
