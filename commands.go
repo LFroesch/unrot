@@ -92,6 +92,19 @@ type auditFixMsg struct{ content string }
 
 type challengeChatMsg struct{ text string }
 
+type chatStreamStartedMsg struct {
+	kind string // "concept", "learn", "challenge"
+	ch   <-chan ollama.StreamChunk
+}
+
+type chatStreamChunkMsg struct {
+	kind        string
+	text        string
+	done        bool
+	err         error
+	durationSec float64
+}
+
 type clipboardMsg struct{ ok bool }
 
 type projectSubsystemsMsg struct {
@@ -330,11 +343,11 @@ Rules:
 			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
 		}
 
-		resp, err := client.ChatWithHistory(ctx, system, msgs)
+		ch, err := client.ChatWithHistoryStream(ctx, system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
-		return learnChatMsg{text: resp}
+		return chatStreamStartedMsg{kind: "learn", ch: ch}
 	}
 }
 
@@ -471,12 +484,11 @@ Be a helpful tutor:
 		for i, h := range history {
 			msgs[i] = ollama.Message{Role: h.role, Content: h.content}
 		}
-		start := time.Now()
-		resp, err := client.ChatWithHistory(ctx, system, msgs)
+		ch, err := client.ChatWithHistoryStream(ctx, system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
-		return conceptChatMsg{text: resp, durationSec: time.Since(start).Seconds()}
+		return chatStreamStartedMsg{kind: "concept", ch: ch}
 	}
 }
 
@@ -604,11 +616,11 @@ Rules:
 			msgs = append(msgs, ollama.Message{Role: h.role, Content: h.content})
 		}
 
-		resp, err := client.ChatWithHistory(ctx, system, msgs)
+		ch, err := client.ChatWithHistoryStream(ctx, system, msgs)
 		if err != nil {
 			return errMsg{err}
 		}
-		return challengeChatMsg{text: resp}
+		return chatStreamStartedMsg{kind: "challenge", ch: ch}
 	}
 }
 
@@ -918,4 +930,20 @@ func getRepoCommitDrift(repoPath, storedCommit string) int {
 	var count int
 	fmt.Sscanf(n, "%d", &count)
 	return count
+}
+
+func listenForChatChunk(kind string, ch <-chan ollama.StreamChunk) tea.Cmd {
+	return func() tea.Msg {
+		chunk, ok := <-ch
+		if !ok {
+			return chatStreamChunkMsg{kind: kind, done: true}
+		}
+		return chatStreamChunkMsg{
+			kind:        kind,
+			text:        chunk.Content,
+			done:        chunk.Done,
+			err:         chunk.Err,
+			durationSec: chunk.Duration.Seconds(),
+		}
+	}
 }

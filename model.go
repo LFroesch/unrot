@@ -287,6 +287,11 @@ type model struct {
 	learnTopic       string // original topic input
 	learnChatLoading bool   // waiting for ollama response
 
+	// Streaming state shared across concept/learn/challenge chats
+	chatStreamKind string // "concept", "learn", "challenge" — empty when idle
+	chatStreamCh   <-chan ollama.StreamChunk
+	chatStreamBuf  strings.Builder
+
 	// Explain-more inline loading
 	explainLoading bool
 

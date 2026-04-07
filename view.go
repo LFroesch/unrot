@@ -1056,6 +1056,10 @@ func (m model) renderChallengeChat() string {
 
 	if m.challengeChatLoading {
 		b.WriteString("  " + m.spinner.View() + " thinking...\n")
+	} else if m.chatStreamKind == "challenge" && m.chatStreamBuf.Len() > 0 {
+		b.WriteString("  🤖\n")
+		b.WriteString(renderExplanation(m.chatStreamBuf.String(), w))
+		b.WriteString("\n")
 	} else {
 		b.WriteString("  " + m.learnTA.View())
 	}
@@ -1324,6 +1328,11 @@ func (m model) buildChatContent(w int) string {
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Width(w).PaddingLeft(2).Foreground(colorDim).Render("🤖 " + m.spinner.View() + " thinking..."))
 		b.WriteString("\n")
+	} else if m.chatStreamKind == "concept" && m.chatStreamBuf.Len() > 0 {
+		b.WriteString("\n")
+		b.WriteString("  🤖\n")
+		b.WriteString(renderExplanation(m.chatStreamBuf.String(), w))
+		b.WriteString("\n")
 	}
 
 	if m.bankLoading {
@@ -1401,6 +1410,10 @@ func (m model) renderLearnChat() string {
 
 	if m.learnChatLoading {
 		b.WriteString("  " + m.spinner.View() + " thinking...\n")
+	} else if m.chatStreamKind == "learn" && m.chatStreamBuf.Len() > 0 {
+		b.WriteString("  🤖\n")
+		b.WriteString(renderExplanation(m.chatStreamBuf.String(), w))
+		b.WriteString("\n")
 	} else {
 		b.WriteString("  " + m.learnTA.View())
 	}

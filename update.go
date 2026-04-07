@@ -243,6 +243,51 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.challengeChatLoading = false
 		return m, nil
 
+	case chatStreamStartedMsg:
+		m.chatStreamKind = msg.kind
+		m.chatStreamCh = msg.ch
+		m.chatStreamBuf.Reset()
+		switch msg.kind {
+		case "concept":
+			m.conceptChatLoading = false
+		case "learn":
+			m.learnChatLoading = false
+		case "challenge":
+			m.challengeChatLoading = false
+		}
+		return m, listenForChatChunk(msg.kind, msg.ch)
+
+	case chatStreamChunkMsg:
+		if m.chatStreamKind != msg.kind {
+			return m, nil // stale chunk after cancel or kind mismatch
+		}
+		if msg.err != nil {
+			m.chatStreamKind = ""
+			m.chatStreamBuf.Reset()
+			return m, func() tea.Msg { return errMsg{msg.err} }
+		}
+		if msg.done {
+			text := m.chatStreamBuf.String()
+			m.chatStreamBuf.Reset()
+			m.chatStreamKind = ""
+			switch msg.kind {
+			case "concept":
+				m.conceptChat = append(m.conceptChat, chatEntry{role: "assistant", content: text, durationSec: msg.durationSec})
+				if m.activeOverlay == overlayChat {
+					m.syncOverlayViewport()
+				} else if m.questionTab == qTabChat {
+					m.syncQuestionChatViewport()
+				}
+			case "learn":
+				m.learnChatHistory = append(m.learnChatHistory, chatEntry{role: "assistant", content: text})
+			case "challenge":
+				m.challengeChatHistory = append(m.challengeChatHistory, chatEntry{role: "assistant", content: text})
+			}
+			return m, nil
+		}
+		m.chatStreamBuf.WriteString(msg.text)
+		return m, listenForChatChunk(msg.kind, m.chatStreamCh)
+
 	case projectStaleCheckMsg:
 		if !msg.hasAny {
 			// No existing knowledge — go straight to proposing

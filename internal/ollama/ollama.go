@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -663,6 +664,88 @@ func (c *Client) ChatWithHistory(ctx context.Context, system string, history []M
 		msgs = append(msgs, message{Role: h.Role, Content: h.Content})
 	}
 	return c.chatMulti(ctx, msgs)
+}
+
+// StreamChunk is one token chunk from a streaming chat response.
+type StreamChunk struct {
+	Content  string
+	Done     bool
+	Err      error
+	Duration time.Duration
+}
+
+// ChatWithHistoryStream sends a streaming chat request and returns chunks via channel.
+func (c *Client) ChatWithHistoryStream(ctx context.Context, system string, history []Message) (<-chan StreamChunk, error) {
+	msgs := []message{{Role: "system", Content: system}}
+	for _, h := range history {
+		msgs = append(msgs, message{Role: h.Role, Content: h.Content})
+	}
+
+	c.sem <- struct{}{}
+
+	body := map[string]interface{}{
+		"model":    c.model,
+		"messages": msgs,
+		"stream":   true,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		<-c.sem
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.host+"/api/chat", bytes.NewReader(data))
+	if err != nil {
+		<-c.sem
+		return nil, fmt.Errorf("ollama request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		<-c.sem
+		return nil, fmt.Errorf("ollama request failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		<-c.sem
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(b))
+	}
+
+	ch := make(chan StreamChunk)
+	go func() {
+		defer resp.Body.Close()
+		defer close(ch)
+		defer func() { <-c.sem }()
+
+		start := time.Now()
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			var sr struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+				Done bool `json:"done"`
+			}
+			if err := json.Unmarshal(line, &sr); err != nil {
+				continue
+			}
+			chunk := StreamChunk{Content: sr.Message.Content, Done: sr.Done}
+			if sr.Done {
+				chunk.Duration = time.Since(start)
+			}
+			ch <- chunk
+		}
+		if err := scanner.Err(); err != nil {
+			ch <- StreamChunk{Err: fmt.Errorf("stream error: %w", err), Done: true}
+		}
+	}()
+
+	return ch, nil
 }
 
 // Chat sends a simple system+user message pair and returns the response.
