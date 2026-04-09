@@ -137,3 +137,7 @@ Or skip the env var — on first launch unrot opens settings where you can set t
 ## State
 
 Confidence data, session history, streaks, achievements, and favorites stored at `~/.local/share/unrot/state.json`. Session reports exportable to `~/.local/share/unrot/reports/`.
+
+## License
+
+[AGPL-3.0](LICENSE)
