@@ -4,6 +4,8 @@ Quiz TUI that fights knowledge decay. Confidence-based review with Ollama-genera
 
 ## Quick Install
 
+Supported platforms: Linux and macOS. On Windows, use WSL.
+
 Recommended (installs to `~/.local/bin`):
 
 ```bash
