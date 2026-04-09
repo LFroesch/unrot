@@ -4,3 +4,7 @@ WORK.md
 agent_spec.md
 unrot
 .claude/
+# Allow release workflow even when .github is globally ignored
+!.github/
+!.github/workflows/
+!.github/workflows/release.yml

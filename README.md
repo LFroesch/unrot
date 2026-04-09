@@ -2,6 +2,33 @@
 
 Quiz TUI that fights knowledge decay. Confidence-based review with Ollama-generated questions from Second Brain knowledge files. XP/leveling, achievements, open-notes testing, conversational learn flow, standalone coding challenges. Daily streaks keep you coming back.
 
+## Quick Install
+
+Recommended (installs to `~/.local/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LFroesch/unrot/main/install.sh | bash
+```
+
+Or download a binary from [GitHub Releases](https://github.com/LFroesch/unrot/releases).
+
+Or install with Go:
+
+```bash
+go install github.com/LFroesch/unrot@latest
+```
+
+Or build from source:
+
+```bash
+make install
+```
+
+Command:
+
+```bash
+unrot
+```
 ## Run
 
 ```
