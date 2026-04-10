@@ -1,8 +1,5 @@
 package knowledge
 
-import (
-	"log"
-)
 
 // DepGraph is a directed dependency graph of knowledge file prerequisites.
 type DepGraph struct {
@@ -119,7 +116,6 @@ func (g *DepGraph) removeCycles() {
 		for _, prereq := range g.prereqs[node] {
 			if color[prereq] == grey {
 				// Back-edge = cycle, remove it
-				log.Printf("unrot: removing cycle edge %s → %s", node, prereq)
 				continue
 			}
 			filtered = append(filtered, prereq)
