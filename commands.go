@@ -22,7 +22,8 @@ type stateLoadedMsg struct {
 	state     *state.State
 	files     []string
 	graph     *knowledge.DepGraph
-	needsPath bool // true when brain path is missing or has no files
+	needsPath bool   // true when brain path is missing or has no files
+	pathHint  string // optional toast explaining why path is rejected
 }
 
 type questionMsg struct {
@@ -146,10 +147,10 @@ func loadState(brainPath string) tea.Cmd {
 		}
 		files, err := knowledge.Discover(brainPath)
 		if err != nil {
-			return stateLoadedMsg{state: s, needsPath: true}
+			return stateLoadedMsg{state: s, needsPath: true, pathHint: fmt.Sprintf("can't read %s/knowledge/ — %v", brainPath, err)}
 		}
 		if len(files) == 0 {
-			return stateLoadedMsg{state: s, needsPath: true}
+			return stateLoadedMsg{state: s, needsPath: true, pathHint: fmt.Sprintf("no .md files found under %s/knowledge/<domain>/", brainPath)}
 		}
 		graph, _ := knowledge.BuildGraph(brainPath, files)
 		return stateLoadedMsg{state: s, files: files, graph: graph}

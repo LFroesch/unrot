@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,8 @@ func TestRenderTopicListKeepsRowsWithinWrapWidth(t *testing.T) {
 }
 
 func TestRenderSettingsWrapsLongKnowledgePath(t *testing.T) {
-	m := initialModel("/Users/example/src/second-brain/knowledge/projects/very/deep/path/that/should/wrap/cleanly", "", 5, 0)
+	longPath := filepath.Join(string(filepath.Separator), "home", "example", "src", "second-brain", "knowledge", "projects", "very", "deep", "path", "that", "should", "wrap", "cleanly")
+	m := initialModel(longPath, "", 5, 0)
 	m.width = 56
 	m.height = 24
 	m.phase = phaseSettings

@@ -100,7 +100,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.needsPath {
 			m.phase = phaseSettings
 			m.settingsCursor = len(ollama.AllTypes) + 2 // brain path row
-			m.toast = "set your knowledge path to get started"
+			if msg.pathHint != "" {
+				m.toast = msg.pathHint
+			} else {
+				m.toast = "set your knowledge path to get started"
+			}
 			return m, nil
 		}
 		m.allFiles = msg.files
@@ -297,6 +301,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, listenForChatChunk(msg.kind, m.chatStreamCh)
 
 	case projectStaleCheckMsg:
+		// Drop stale results from a cancelled check — user esc'd back to repo input
+		// (or further). Without this guard, the late message snaps them into
+		// projectStaleResult/Proposing with data they no longer wanted.
+		if m.phase != phaseProject || m.projectStep != projectCheckingStale {
+			return m, nil
+		}
 		if !msg.hasAny {
 			// No existing knowledge — go straight to proposing
 			openProjectLog(&m)

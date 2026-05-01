@@ -6,6 +6,18 @@ Quiz TUI that fights knowledge decay. Confidence-based review with Ollama-genera
 
 Supported platforms: Linux and macOS. On Windows, use WSL.
 
+### 0. Install Ollama and pull a model
+
+unrot generates and grades questions via a local [Ollama](https://ollama.com) daemon. Install it, make sure it's running on `localhost:11434`, then pull the default model:
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+Other models work — set `UNROT_MODEL` to override. Smaller models are faster but produce weaker questions/grading.
+
+### 1. Install unrot
+
 Recommended (installs to `~/.local/bin`):
 
 ```bash
@@ -35,11 +47,12 @@ unrot
 ## Run
 
 ```bash
-unrot              # dashboard (saved setting or default 5 questions/session)
-unrot docker       # drill a specific domain
-unrot -n 5         # quick 5-question session
-unrot -n 0 docker  # unlimited session, docker only
-./unrot            # run local build from source checkout
+unrot                       # dashboard (saved setting or default 5 questions/session)
+unrot docker                # drill a specific domain
+unrot -n 5                  # quick 5-question session
+unrot -n 0 docker           # unlimited session, docker only
+unrot --brain ~/notes       # one-shot override of knowledge path
+./unrot                     # run local build from source checkout
 ```
 
 ## Screens
@@ -144,7 +157,7 @@ Or skip the env var — on first launch unrot opens settings where you can set t
 |---------|---------|---------|
 | `SECOND_BRAIN` | (none — set via env or settings) | Path to Second Brain root |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
-| `UNROT_MODEL` | `qwen2.5:3b` | Model for question generation |
+| `UNROT_MODEL` | `qwen2.5:7b` | Model for question generation |
 | `UNROT_DAILY_GOAL` | (unset) | Daily question goal (shows progress bar) |
 
 ## State

@@ -1,5 +1,20 @@
 ## DevLog
 
+### 2026-04-30: Onboarding fixes for new users
+- README: added "Step 0" Ollama install + `ollama pull qwen2.5:7b` block; corrected `UNROT_MODEL` default from `qwen2.5:3b` → `qwen2.5:7b` to match `ollama.New()`
+- `--brain <path>` CLI flag overrides `SECOND_BRAIN` env and saved state for one-shot use
+- Settings toast on missing knowledge path now explains *why* (e.g. "no .md files found under <path>/knowledge/<domain>/") instead of generic "set your knowledge path"
+- Remaining onboarding gaps (Ollama liveness check, "Second Brain" jargon, default question-type subset, JSON parsing) noted at top of WORK.md
+- Files: `README.md`, `main.go`, `commands.go`, `update.go`, `WORK.md`
+
+### 2026-04-30: Project mode — drop late staleness results after cancel
+Cancelling the staleness check (`esc`/`q` during projectCheckingStale) returned the user to repo input, but the in-flight `checkProjectStalenessCmd` would still deliver a `projectStaleCheckMsg` later and snap the UI into projectStaleResult/Proposing — losing the cancel. Guarded the message handler to ignore results unless the user is still in projectCheckingStale. Files: update.go.
+
+### 2026-04-30: Remove hardcoded absolute user path from test fixture
+- Replaced the `"/Users/example/..."` settings-wrap regression fixture with a `filepath.Join(...)` path so the test stays platform-neutral
+- No runtime path logic changed; the app still resolves user directories via `os.UserHomeDir` and `filepath.Join`
+- `helpers_test.go`, `WORK.md`
+
 ### 2026-04-27: Topic list full-width cursor bar + expanded help
 - Selected row in browse-topics now pads to full terminal width with bg color (was capped at ~52 cols)
 - Help screen (`?`) reorganized into grouped sections: Global, Dashboard, Topic list, Quiz question, Quiz result, Chat/Knowledge, Learn/Project/Challenge
