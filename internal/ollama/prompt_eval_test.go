@@ -99,6 +99,9 @@ func TestPromptEval(t *testing.T) {
 		{"ordering", TypeOrdering},
 		{"code-output", TypeCodeOutput},
 		{"debug", TypeDebug},
+		{"decision", TypeDecision},
+		{"architecture", TypeArchitecture},
+		{"refactor", TypeRefactor},
 	}
 
 	diffs := []Difficulty{DiffBasic, DiffIntermediate, DiffAdvanced}

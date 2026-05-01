@@ -74,6 +74,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncViewport()
 		m.overlayViewport.Width = m.width - 16
 		m.overlayViewport.Height = m.height - 10
+		m.syncHelpViewport()
 		m.answerTA.SetWidth(m.width - 8)
 		m.learnTA.SetWidth(m.width - 8)
 		m.pickSearch.Width = m.width - 12
@@ -670,9 +671,9 @@ func (m *model) settingsCursorLine() int {
 	if m.settingsCursor < len(ollama.AllTypes) {
 		return 3 + m.settingsCursor
 	}
-	// After quiz types: each section adds ~4 lines (blank + divider + blank + content)
+	// After quiz types: later sections often wrap values onto a second line.
 	base := 3 + len(ollama.AllTypes)
-	return base + (m.settingsCursor-len(ollama.AllTypes)+1)*4
+	return base + (m.settingsCursor-len(ollama.AllTypes)+1)*5
 }
 
 // ensureSettingsCursorVisible scrolls the settings viewport so the cursor row is visible.
@@ -978,6 +979,20 @@ func (m *model) syncViewport() {
 	m.viewport.GotoTop()
 }
 
+func (m *model) syncHelpViewport() {
+	w := m.width - 4
+	if w < 30 {
+		w = 30
+	}
+	h := m.contentHeight()
+	if h < 5 {
+		h = 5
+	}
+	m.helpViewport.Width = w
+	m.helpViewport.Height = h
+	m.helpViewport.SetContent(m.buildHelpContent())
+}
+
 func (m *model) syncOverlayViewport() {
 	w := m.width - 16
 	if w < 30 {
@@ -1062,13 +1077,20 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if key == "?" {
 		m.showHelp = !m.showHelp
+		if m.showHelp {
+			m.syncHelpViewport()
+			m.helpViewport.GotoTop()
+		}
 		return m, nil
 	}
 	if m.showHelp {
 		if key == "esc" || key == "q" {
 			m.showHelp = false
+			return m, nil
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.helpViewport, cmd = m.helpViewport.Update(msg)
+		return m, cmd
 	}
 
 	// Overlay keys take priority
@@ -1100,7 +1122,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case phaseDone:
 		return m.handleDone(msg)
 	case phaseError:
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			m.goHome()
 			m.err = nil
 			return m, nil
@@ -1258,7 +1280,7 @@ func (m model) handleDashboard(key string) (model, tea.Cmd) {
 func (m model) handleRecent(key string) (model, tea.Cmd) {
 	recent := m.state.RecentQuestions
 	switch key {
-	case "esc":
+	case "esc", "q":
 		m.goHome()
 		return m, nil
 	case "j", "down":
@@ -1399,7 +1421,7 @@ func (m model) handleTopicList(msg tea.KeyMsg) (model, tea.Cmd) {
 	case "tab":
 		m.openDomainOverlay()
 		return m, nil
-	case "esc":
+	case "esc", "q":
 		if m.resetConfirm {
 			m.resetConfirm = false
 			return m, nil
@@ -1421,7 +1443,7 @@ func (m model) handleQuiz(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m.handleSessionContinue(msg)
 	case stepLoading, stepGrading:
 		key := msg.String()
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			m.cancelOllama()
 			if m.pickMode {
 				m.phase = phaseTopicList
@@ -1471,19 +1493,12 @@ func (m model) handleLesson(msg tea.KeyMsg) (model, tea.Cmd) {
 	case "n":
 		m.openNotesOverlay()
 		return m, nil
-	case "esc":
+	case "esc", "q":
 		if m.pickMode {
 			m.phase = phaseTopicList
 			return m, nil
 		}
 		return m, m.skipToNextFile()
-	case "q":
-		if m.pickMode {
-			m.phase = phaseTopicList
-			return m, nil
-		}
-		m.goHome()
-		return m, nil
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -1624,7 +1639,7 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 		case "n":
 			m.openNotesOverlay()
 			return m, nil
-		case "esc":
+		case "esc", "q":
 			m.questionTab = qTabQuiz
 			m.clearAuditState()
 			m.answerTA.Reset()
@@ -1699,7 +1714,7 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 			}
 			(&m).queueAlert(alertHint, "not quite — try again")
 			return m, nil
-		case key == "esc":
+		case key == "esc" || key == "q":
 			if m.pickMode {
 				m.phase = phaseTopicList
 				return m, nil
@@ -1956,7 +1971,7 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.levelUpFrom = 0
 		m.xpGained = 0
 		return m, m.nextQuestion()
-	case "esc":
+	case "esc", "q":
 		m.activeOverlay = overlayNone
 		if m.ratedConfidence == 0 {
 			// Auto-record neutral confidence so scheduling data isn't lost
@@ -2026,7 +2041,7 @@ func (m model) handleOverlay(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, cmd
 		}
 		switch key {
-		case "esc", "k":
+		case "esc", "k", "q":
 			m.activeOverlay = overlayNone
 			m.clearAuditState()
 			return m, nil
@@ -2054,7 +2069,7 @@ func (m model) handleOverlay(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.filterPickFiles()
 			}
 			return m, nil
-		case "esc":
+		case "esc", "q":
 			m.domainCursor = m.domainCursorPrev
 			m.applyDomainCursor()
 			m.activeOverlay = overlayNone
@@ -2212,7 +2227,7 @@ func (m model) handleLearn(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 
 	case learnGenerating:
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			m.cancelOllama()
 			m.learnStep = learnInput
 			m.learnTA.Reset()
@@ -2241,7 +2256,7 @@ func (m model) handleLearn(msg tea.KeyMsg) (model, tea.Cmd) {
 				files = m.allFiles
 			}
 			return m, generateKnowledgeFromChat(m.ollamaCtx, m.ollama, m.learnTopic, m.learnChatHistory, files, m.brainPath, m.learnUpdateFile)
-		case "esc":
+		case "esc", "q":
 			m.learnTA.Reset()
 			m.learnTA.Placeholder = "e.g. docker/multi-stage-builds"
 			m.learnTA.Focus()
@@ -2269,7 +2284,7 @@ func (m model) handleViewer(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, cmd
 	}
 	// Audit result: esc dismisses and restores content
-	if m.auditResult != "" && key == "esc" {
+	if m.auditResult != "" && (key == "esc" || key == "q") {
 		m.auditResult = ""
 		m.viewport.SetContent(renderMarkdown(m.sourceContent, m.wrapW()))
 		m.viewport.GotoTop()
@@ -2291,7 +2306,7 @@ func (m model) handleViewer(msg tea.KeyMsg) (model, tea.Cmd) {
 	case "n":
 		m.openNotesOverlay()
 		return m, nil
-	case "esc":
+	case "esc", "q":
 		m.auditResult = ""
 		m.phase = phaseTopicList
 		m.filterPickFiles()
@@ -2498,7 +2513,7 @@ func (m model) handleSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.enrichIndex = string(indexContent)
 			return m, enrichFileCmd(m.ollamaCtx, m.ollama, m.brainPath, m.enrichIndex, m.enrichFiles[0])
 		}
-	case "esc":
+	case "esc", "q":
 		m.goHome()
 		return m, nil
 	default:
@@ -2516,7 +2531,7 @@ func (m model) handleSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m model) handleStats(msg tea.KeyMsg) (model, tea.Cmd) {
 	key := msg.String()
-	if key == "esc" {
+	if key == "esc" || key == "q" {
 		m.goHome()
 		return m, nil
 	}
@@ -2599,7 +2614,7 @@ func (m model) handleChallenge(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 
 	case challengeLoading, challengeGrading:
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			m.cancelOllama()
 			m.goHome()
 			return m, nil
@@ -2622,7 +2637,8 @@ func (m model) handleChallenge(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		// esc on non-code tab returns to code tab; on code tab goes home
-		if key == "esc" {
+		// q only intercepts on Problem tab (Code/Chat have textarea input)
+		if key == "esc" || (key == "q" && m.challengeTab == cTabProblem) {
 			if m.challengeTab != cTabCode {
 				if m.challengeTab == cTabChat {
 					m.savedChatInput = m.answerTA.Value()
@@ -2710,7 +2726,8 @@ func (m model) handleChallenge(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		}
 		// esc on non-code tab returns to code tab; on code tab goes home
-		if key == "esc" {
+		// q intercepts on non-Chat tabs (Chat has textarea input)
+		if key == "esc" || (key == "q" && m.challengeTab != cTabChat) {
 			if m.challengeTab != cTabCode {
 				if m.challengeTab == cTabChat {
 					m.savedChatInput = m.answerTA.Value()
@@ -2843,7 +2860,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 
 	case projectCheckingStale:
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			m.projectStep = projectRepoInput
 			m.learnTA.Reset()
 			m.learnTA.Placeholder = "repo path (e.g. ~/projects/myapp)"
@@ -2854,7 +2871,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 
 	case projectStaleResult:
 		switch key {
-		case "esc":
+		case "esc", "q":
 			m.projectStep = projectRepoInput
 			m.learnTA.Reset()
 			m.learnTA.Placeholder = "repo path (e.g. ~/projects/myapp)"
@@ -2898,7 +2915,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 
 	case projectProposing:
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			closeProjectLog(&m)
 			m.projectStep = projectRepoInput
 			m.learnTA.Reset()
@@ -2909,7 +2926,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 
 	case projectGenerating:
-		if key == "esc" {
+		if key == "esc" || key == "q" {
 			closeProjectLog(&m)
 			m.goHome()
 			return m, nil
@@ -2917,7 +2934,7 @@ func (m model) handleProject(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 
 	case projectDone:
-		if key == "esc" || key == "enter" {
+		if key == "esc" || key == "enter" || key == "q" {
 			m.goHome()
 			return m, nil
 		}

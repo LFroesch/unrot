@@ -256,13 +256,7 @@ func (m model) renderHeader() string {
 	rightSep := headerDimStyle.Render(" · ")
 	right := strings.Join(rightParts, rightSep)
 
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // -2 for padding
-	if gap < 1 {
-		gap = 1
-	}
-
-	styledGap := lipgloss.NewStyle().Background(lipgloss.Color("235")).Inline(true).Render(strings.Repeat(" ", gap))
-	bar := left + styledGap + right
+	bar := alignBar(left, right, m.width-2)
 	return headerBarStyle.Width(m.width).Render(bar)
 }
 
@@ -580,6 +574,7 @@ func formatAge(t time.Time) string {
 
 func (m model) renderTopicList() string {
 	var b strings.Builder
+	ww := m.wrapW()
 
 	b.WriteString(questionStyle.Render("browse topics"))
 	domainLabel := "all"
@@ -591,9 +586,9 @@ func (m model) renderTopicList() string {
 
 	// Search bar
 	if m.pickSearching {
-		b.WriteString("\n  " + dimStyle.Render("/") + " " + m.pickSearch.View())
+		b.WriteString("  " + dimStyle.Render("/") + " " + m.pickSearch.View())
 	} else {
-		b.WriteString("\n" + dimStyle.Render("  / to search"))
+		b.WriteString(dimStyle.Render("  / to search"))
 	}
 	b.WriteString("\n")
 
@@ -607,9 +602,7 @@ func (m model) renderTopicList() string {
 		return b.String()
 	}
 
-	b.WriteString("\n")
-
-	visible := m.contentHeight() - 12
+	visible := m.contentHeight() - 10
 	if visible < 5 {
 		visible = 5
 	}
@@ -625,6 +618,20 @@ func (m model) renderTopicList() string {
 		if start < 0 {
 			start = 0
 		}
+	}
+
+	// Row layout:
+	//   "  " margin + "> " cursor(2) + favorite(2) + name(nameW) + "  " gap(2) + suffix(suffixW) + trailing pad
+	// Suffix column is capped so it sits roughly in the middle instead of against the right edge.
+	// Selected rows pad to full terminal width so the cursor bar background spans edge-to-edge.
+	nameW := 28
+	suffixW := 18
+	if ww < 60 {
+		nameW = ww - 2 - 2 - 2 - 2 - 14
+		if nameW < 12 {
+			nameW = 12
+		}
+		suffixW = 14
 	}
 
 	lastDomain := ""
@@ -643,9 +650,6 @@ func (m model) renderTopicList() string {
 		name := strings.TrimSuffix(filepath.Base(file), ".md")
 
 		if domain != lastDomain {
-			if lastDomain != "" {
-				b.WriteString("\n")
-			}
 			avg := m.pickDomainAvgConfidence(domain)
 			b.WriteString(fmt.Sprintf("  %s  %s\n",
 				domainStyle.Render(domain),
@@ -671,40 +675,44 @@ func (m model) renderTopicList() string {
 			}
 		}
 		dots := confidenceDots(conf)
-		favMark := ""
+		favMark := "  "
 		if m.state != nil && m.state.IsFavorite(file) {
 			favMark = streakStyle.Render("★ ")
 		}
 
-		nameWidth := m.width - 28
-		if nameWidth < 20 {
-			nameWidth = 20
+		selected := i == m.pickCursor
+		cursorCol := "  "
+		if selected {
+			cursorCol = cursorStyle.Render("> ")
 		}
-		if nameWidth > 40 {
-			nameWidth = 40
-		}
-		nameStyled := lipgloss.NewStyle().Width(nameWidth)
+
 		suffix := dots
 		if viewedLabel != "" {
 			suffix += " " + dimStyle.Render(viewedLabel)
 		}
-		if i == m.pickCursor {
-			b.WriteString(fmt.Sprintf("  %s %s%s %s\n",
-				cursorStyle.Render(">"),
-				favMark,
-				nameStyled.Foreground(colorText).Render(name),
-				suffix,
-			))
+
+		nameText := fitText(name, nameW)
+		if selected {
+			nameText = lipgloss.NewStyle().Foreground(colorText).Bold(true).Render(nameText)
+		}
+		suffixText := fitText(suffix, suffixW)
+
+		row := cursorCol + favMark + nameText + "  " + suffixText
+		if selected {
+			barW := m.width - 4
+			if barW < lipgloss.Width(row)+2 {
+				barW = lipgloss.Width(row) + 2
+			}
+			fullRow := fitText("  "+row, barW)
+			bgOpen := "\x1b[48;5;237m"
+			bgClose := "\x1b[49m"
+			painted := bgOpen + strings.ReplaceAll(fullRow, "\x1b[0m", "\x1b[0m"+bgOpen) + bgClose
+			b.WriteString(painted + "\n")
 		} else {
-			b.WriteString(fmt.Sprintf("    %s%s %s\n",
-				favMark,
-				nameStyled.Render(name),
-				suffix,
-			))
+			b.WriteString("  " + row + "\n")
 		}
 	}
 
-	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(fmt.Sprintf("  %d/%d", m.pickCursor+1, len(m.pickFiles))))
 
 	return b.String()
@@ -1570,7 +1578,7 @@ func (m model) renderProjectProgress() string {
 			b.WriteString("\n")
 			b.WriteString("      " + dimStyle.Render(m.projectScanStatus) + "\n")
 		default: // pending
-			b.WriteString(dimStyle.Render("    " + e.slug) + "\n")
+			b.WriteString(dimStyle.Render("    "+e.slug) + "\n")
 		}
 	}
 
@@ -1725,26 +1733,26 @@ func (m model) buildStatsContent() string {
 
 	b.WriteString(divider("domains", ww))
 	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("  %-14s  %-13s  %s\n",
-		labelStyle.Render("domain"),
-		labelStyle.Render("confidence"),
-		labelStyle.Render("files"),
-	))
+	domainW := 18
+	if ww < 38 {
+		domainW = 12
+	}
+	avgW := 4
+	filesW := 5
+	b.WriteString("  " +
+		fitText(labelStyle.Render("domain"), domainW) + "  " +
+		fitText(labelStyle.Render("level"), 5) + "  " +
+		fitText(labelStyle.Render("avg"), avgW) + "  " +
+		fitText(labelStyle.Render("files"), filesW) + "\n")
 
 	for _, ds := range stats {
-		name := ds.Domain
-		if len(name) > 14 {
-			name = name[:14]
-		}
-		name = name + strings.Repeat(" ", 14-len(name))
 		dots := confidenceDots(int(ds.AvgConfidence + 0.5))
 		avg := fmt.Sprintf("%.1f", ds.AvgConfidence)
-		b.WriteString(fmt.Sprintf("  %s  %s %s  %s\n",
-			domainStyle.Render(name),
-			dots,
-			dimStyle.Render(avg),
-			dimStyle.Render(fmt.Sprintf("%d", ds.Total)),
-		))
+		b.WriteString("  " +
+			fitText(domainStyle.Render(ds.Domain), domainW) + "  " +
+			fitText(dots, 5) + "  " +
+			fitText(dimStyle.Render(avg), avgW) + "  " +
+			fitText(dimStyle.Render(fmt.Sprintf("%d", ds.Total)), filesW) + "\n")
 	}
 
 	// Achievements
@@ -1775,12 +1783,13 @@ func (m model) buildStatsContent() string {
 
 func (m model) renderSettings() string {
 	var b strings.Builder
+	ww := m.wrapW()
 
 	b.WriteString(questionStyle.Render("settings"))
 	b.WriteString("\n\n")
 
 	// Quiz types section
-	b.WriteString(divider("quiz types", m.wrapW()))
+	b.WriteString(divider("quiz types", ww))
 	b.WriteString("\n\n")
 
 	for i, t := range ollama.AllTypes {
@@ -1803,7 +1812,7 @@ func (m model) renderSettings() string {
 
 	// Session length setting
 	b.WriteString("\n")
-	b.WriteString(divider("session", m.wrapW()))
+	b.WriteString(divider("session", ww))
 	b.WriteString("\n\n")
 
 	idxSession := len(ollama.AllTypes)
@@ -1819,7 +1828,7 @@ func (m model) renderSettings() string {
 
 	// Default Challenge difficulty setting
 	b.WriteString("\n")
-	b.WriteString(divider("challenge", m.wrapW()))
+	b.WriteString(divider("challenge", ww))
 	b.WriteString("\n\n")
 
 	idxChallDiff := len(ollama.AllTypes) + 1
@@ -1843,24 +1852,35 @@ func (m model) renderSettings() string {
 
 	// Brain path setting
 	b.WriteString("\n")
-	b.WriteString(divider("knowledge path", m.wrapW()))
+	b.WriteString(divider("knowledge path", ww))
 	b.WriteString("\n\n")
 
 	idxBrainPath := len(ollama.AllTypes) + 2
 	if m.settingsEditing && m.settingsCursor == idxBrainPath {
 		b.WriteString(fmt.Sprintf("  %s %s\n", cursorStyle.Render(">"), m.learnTA.View()))
-	} else if m.settingsCursor == idxBrainPath {
-		b.WriteString(fmt.Sprintf("  %s %s  %s\n",
-			cursorStyle.Render(">"),
-			m.brainPath,
-			dimStyle.Render("enter to edit")))
 	} else {
-		b.WriteString(fmt.Sprintf("    %s\n", dimStyle.Render(m.brainPath)))
+		pathValue := m.brainPath
+		if strings.TrimSpace(pathValue) == "" {
+			pathValue = "(not set)"
+		}
+		cursor := "  "
+		if m.settingsCursor == idxBrainPath {
+			cursor = cursorStyle.Render("> ")
+		}
+		b.WriteString("  " + cursor + labelStyle.Render("current path") + "\n")
+		style := dimStyle
+		if m.settingsCursor == idxBrainPath {
+			style = lipgloss.NewStyle().Foreground(colorText)
+		}
+		b.WriteString(style.PaddingLeft(4).Width(ww).Render(pathValue) + "\n")
+		if m.settingsCursor == idxBrainPath {
+			b.WriteString("    " + dimStyle.Render("enter to edit") + "\n")
+		}
 	}
 
 	// Enrich knowledge base
 	b.WriteString("\n")
-	b.WriteString(divider("knowledge enrichment", m.wrapW()))
+	b.WriteString(divider("knowledge enrichment", ww))
 	b.WriteString("\n\n")
 	if m.enrichRunning {
 		pct := 0
@@ -1875,33 +1895,33 @@ func (m model) renderSettings() string {
 			b.WriteString(fmt.Sprintf("    %s\n", dimStyle.Render(fmt.Sprintf("%d errors so far", m.enrichErrors))))
 		}
 	} else {
-		b.WriteString(fmt.Sprintf("    %s  %s\n",
-			dimStyle.Render("e"),
-			dimStyle.Render("tag all files with difficulty + connections via ollama")))
+		b.WriteString("    " + dimStyle.Render("e") + "\n")
+		b.WriteString(dimStyle.PaddingLeft(6).Width(ww-2).Render("tag all files with difficulty + connections via ollama") + "\n")
 	}
 
 	// Log ollama calls setting
 	b.WriteString("\n")
-	b.WriteString(divider("debug", m.wrapW()))
+	b.WriteString(divider("debug", ww))
 	b.WriteString("\n\n")
 
 	idxLogCalls := len(ollama.AllTypes) + 3
 	logOn := m.state != nil && m.state.LogCalls
 	logMarker := dimStyle.Render("○")
-	logLabel := dimStyle.Render("log ollama calls to file")
+	logLabel := "log ollama calls to file"
 	if logOn {
 		logMarker = lipgloss.NewStyle().Foreground(colorAccent).Render("●")
-		logLabel = "log ollama calls to file"
 	}
 	if m.settingsCursor == idxLogCalls {
-		b.WriteString(fmt.Sprintf("  %s %s %s\n", cursorStyle.Render(">"), logMarker, logLabel))
+		b.WriteString(fmt.Sprintf("  %s %s\n", cursorStyle.Render(">"), logMarker))
+		b.WriteString(dimStyle.PaddingLeft(6).Width(ww-2).Render(logLabel) + "\n")
 		if logOn {
 			home, _ := os.UserHomeDir()
 			logPath := filepath.Join(home, ".local", "share", "unrot", "logs")
-			b.WriteString(fmt.Sprintf("    %s\n", dimStyle.Render(logPath)))
+			b.WriteString(dimStyle.PaddingLeft(4).Width(ww).Render(logPath) + "\n")
 		}
 	} else {
-		b.WriteString(fmt.Sprintf("    %s %s\n", logMarker, logLabel))
+		b.WriteString("    " + logMarker + "\n")
+		b.WriteString(dimStyle.PaddingLeft(6).Width(ww-2).Render(logLabel) + "\n")
 	}
 
 	return b.String()
@@ -2287,35 +2307,101 @@ func (m model) learnStatusKeys() []struct{ key, action string } {
 	return nil
 }
 
-func (m model) renderHelp() string {
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorPrimary).
-		Padding(1, 2).
-		Width(m.width - 4)
-
-	keys := []struct{ key, desc string }{
-		{"j/k, ↑/↓", "Navigate"},
-		{"enter", "Select / answer"},
-		{"e", "Explain more"},
-		{"n", "Next question"},
-		{"tab", "Switch domain"},
-		{"esc/q", "Back"},
-		{"?", "Toggle this help"},
-		{"ctrl+c", "Quit immediately"},
+func (m model) buildHelpContent() string {
+	groups := []struct {
+		title string
+		keys  []struct{ key, desc string }
+	}{
+		{"Global", []struct{ key, desc string }{
+			{"esc / q", "back / cancel / dismiss overlay (q ignored in text inputs)"},
+			{"ctrl+c", "force quit (always)"},
+			{"?", "toggle this help"},
+			{"j/k, ↑/↓", "navigate / scroll"},
+			{"enter", "confirm / advance / submit"},
+			{"tab", "switch tab / cycle domain filter"},
+		}},
+		{"Dashboard", []struct{ key, desc string }{
+			{"r / enter", "smart review (priority-ordered)"},
+			{"F", "focused review (favorites only)"},
+			{"R", "recent questions"},
+			{"i / I", "challenge / interview mode"},
+			{"p / v", "project scan / knowledge viewer"},
+			{"b / l", "browse topics / learn new topic"},
+			{"s / a", "settings / stats"},
+			{"q", "quit (dashboard only)"},
+		}},
+		{"Topic list", []struct{ key, desc string }{
+			{"/", "search filter"},
+			{"f", "toggle favorite"},
+			{"x", "reset progress for file (press twice)"},
+			{"+", "learn new topic in this domain"},
+		}},
+		{"Quiz — question", []struct{ key, desc string }{
+			{"a/b/c/d", "pick (multiple-choice)"},
+			{"enter / ctrl+s", "submit answer (typed / code)"},
+			{"tab / shift+tab", "cycle chat / quiz / knowledge tab"},
+			{"h / ctrl+e", "hint (MC / typed)"},
+			{"ctrl+r", "regenerate question"},
+		}},
+		{"Quiz — result", []struct{ key, desc string }{
+			{"1-5", "rate confidence (required to advance)"},
+			{"r", "retry / re-quiz same topic"},
+			{"e", "explain more"},
+			{"k / c / n", "knowledge / chat / notes overlay"},
+		}},
+		{"Chat & Knowledge", []struct{ key, desc string }{
+			{"ctrl+b", "bank chat insights to notes"},
+			{"ctrl+y", "copy chat log to clipboard"},
+			{"ctrl+l", "clear chat history"},
+			{"a", "audit knowledge file accuracy"},
+			{"ctrl+s", "save notes (notes overlay)"},
+		}},
+		{"Learn / Project / Challenge", []struct{ key, desc string }{
+			{"ctrl+g", "generate from chat (learn / challenge)"},
+			{"s / r", "save / regenerate (learn review)"},
+			{"w", "export session report (done screen)"},
+		}},
 	}
 
 	var lines []string
 	lines = append(lines, titleStyle.Render("unrot — Help"))
-	lines = append(lines, "")
-	for _, k := range keys {
-		lines = append(lines, fmt.Sprintf("  %s  %s",
-			keyStyle.Render(fmt.Sprintf("%-16s", k.key)), k.desc))
+	lines = append(lines, dimStyle.Render("status bar shows context-specific keys; this is the full reference"))
+	for _, g := range groups {
+		lines = append(lines, "")
+		lines = append(lines, labelStyle.Render(g.title))
+		for _, k := range g.keys {
+			lines = append(lines, fmt.Sprintf("  %s  %s",
+				keyStyle.Render(fmt.Sprintf("%-16s", k.key)), k.desc))
+		}
 	}
-	lines = append(lines, "")
-	lines = append(lines, dimStyle.Render("Press ?, q, or esc to close"))
+	return strings.Join(lines, "\n")
+}
 
-	return lipgloss.Place(m.width, m.height,
-		lipgloss.Center, lipgloss.Center,
-		box.Render(strings.Join(lines, "\n")))
+func (m model) renderHelp() string {
+	header := m.renderHeader()
+	panel := panelStyle.Width(m.width).Height(m.contentHeight())
+	content := panel.Render(m.helpViewport.View())
+	status := m.renderHelpStatus()
+	return header + "\n\n" + content + "\n" + status
+}
+
+func (m model) renderHelpStatus() string {
+	keys := []struct{ key, action string }{
+		{"↑↓ / j/k", "scroll"}, {"pgup/pgdn", "page"}, {"?", "close"}, {"esc/q", "close"},
+	}
+	var parts []string
+	for i, k := range keys {
+		if i > 0 {
+			parts = append(parts, statusBulletStyle.Render(" · "))
+		}
+		if k.key != "" {
+			parts = append(parts, statusKeyStyle.Render(k.key+" "), statusActionStyle.Render(k.action))
+		} else {
+			parts = append(parts, statusBulletStyle.Render(k.action))
+		}
+	}
+	if hint := scrollHint(m.helpViewport); hint != "" {
+		parts = append(parts, statusBulletStyle.Render(" · "), statusBulletStyle.Render(hint))
+	}
+	return statusBarStyle.Width(m.width).Render(strings.Join(parts, ""))
 }

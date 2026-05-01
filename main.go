@@ -11,9 +11,21 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	maxQ := flag.Int("n", 0, "max questions per session (0 = use saved setting, default 5)")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "unrot — Quiz TUI for fighting knowledge decay (Second Brain + Ollama)\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: unrot [flags] [domain]\n\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("unrot " + version)
+		os.Exit(0)
+	}
 
 	brainPath := os.Getenv("SECOND_BRAIN")
 	if brainPath == "" {

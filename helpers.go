@@ -71,6 +71,61 @@ func placeOverlay(bg, fg string) string {
 	return strings.Join(result, "\n")
 }
 
+// truncateANSI truncates a string to display width while preserving ANSI styling.
+func truncateANSI(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	return xansi.Truncate(s, width, "…")
+}
+
+// fitText truncates or right-pads text so it occupies exactly width cells.
+func fitText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	s = truncateANSI(s, width)
+	if w := lipgloss.Width(s); w < width {
+		s += strings.Repeat(" ", width-w)
+	}
+	return s
+}
+
+// alignBar composes left/right header content into a fixed-width line.
+func alignBar(left, right string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if right == "" {
+		return fitText(left, width)
+	}
+
+	right = truncateANSI(right, width)
+	rightWidth := lipgloss.Width(right)
+	if rightWidth >= width {
+		return fitText(right, width)
+	}
+
+	leftWidth := lipgloss.Width(left)
+	availableLeft := width - rightWidth - 1
+	if availableLeft < 1 {
+		return fitText(right, width)
+	}
+	if leftWidth > availableLeft {
+		left = truncateANSI(left, availableLeft)
+		leftWidth = lipgloss.Width(left)
+	}
+
+	gap := width - leftWidth - rightWidth
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
 // scrollHint returns a compact dim scroll indicator for the header bar.
 // Returns "" if content fits in the viewport.
 func scrollHint(vp viewport.Model) string {

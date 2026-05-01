@@ -1081,18 +1081,21 @@ The code snippet (shown to the user with // ??? as the blank):
 The model answer (INTERNAL — NEVER reveal this):
 %s
 
+Grading philosophy: this is a learning tool, not a compiler. Lean toward CORRECT when the user's code would do the right thing — don't nitpick style or syntax sugar.
+
 Rules:
 - Accept ANY implementation that is semantically equivalent or achieves the same correct result.
 - Do NOT require exact syntax match — different but equally valid code is CORRECT.
-- Be strict about semantic correctness: wrong behavior, missing keywords, or broken logic = WRONG.
-- Small style differences (spacing, variable names) are fine if behavior is correct.
+- Small style differences (spacing, variable names, equivalent idioms) are fine if behavior is correct.
+- Only mark WRONG for actual semantic errors: wrong behavior, missing critical keywords, or broken logic. Don't mark wrong for cosmetic drift.
+- Ground feedback in what the USER actually wrote. Quote or reference their specific code ("your use of X", "when you wrote Y") so they know you read it.
 
 Output EXACTLY this format:
 CORRECT: <yes/no>
 ---
-<2-3 sentences of feedback:
-- If CORRECT: explain what their code does and why it works in this context. Reinforce the concept.
-- If WRONG: describe what the code they wrote would actually do (or fail to do) in context. Point at the specific concept or keyword they need — do NOT name or quote the correct answer. Give a directional code hint (e.g. "think about how X prevents Y" or "you need a mechanism that Z").>
+<2-3 sentences of feedback, grounded in their code:
+- If CORRECT: point to the specific line/keyword they used and explain why it works here. Reinforce the concept.
+- If WRONG: reference the specific part of their code that's off ("your call to X would…", "the way you used Y…"), describe what it would actually do, then give a directional hint — do NOT name or quote the correct answer.>
 
 CRITICAL: Never reveal the model answer, never say "the answer is", never quote or paraphrase the expected line.`, snippet, expectedLine)
 
@@ -1107,18 +1110,22 @@ CRITICAL: Never reveal the model answer, never say "the answer is", never quote 
 
 // GradeAnswer evaluates a typed answer against the correct answer.
 func (c *Client) GradeAnswer(ctx context.Context, question, correctAnswer, userAnswer string) (*AnswerGrade, error) {
-	system := fmt.Sprintf(`You are grading a quiz answer. The correct answer is: %s
+	system := fmt.Sprintf(`You are grading a quiz answer. The model answer is: %s
+
+Grading philosophy: this is a learning tool, not an exam. Lean toward CORRECT. A short or imperfectly worded answer that shows the user grasps the core idea is correct.
 
 Rules:
-- If the user's answer matches the correct answer (exactly or close enough), mark CORRECT: yes. Do not overthink this.
-- Accept substantially equivalent answers even if worded differently.
-- Be lenient on completeness, strict on factual accuracy.
-- If wrong: do NOT reveal the correct answer in feedback. Point at what's off and guide them toward the right concept.
+- CORRECT: yes if the user demonstrates understanding of the central concept, even if incomplete, informal, or worded differently.
+- CORRECT: no only for answers that are factually wrong, miss the core concept, or confuse it with something else. Empty/trivially-off-topic answers are also no.
+- Ground your feedback in what the USER actually wrote. Reference their wording — quote or paraphrase a phrase from their answer so they know you read it.
+- If wrong: do NOT reveal the model answer. Point at what's off in their reasoning and guide them toward the right concept.
 
 Output EXACTLY:
 CORRECT: <yes/no>
 ---
-<2-3 sentences: if correct, reinforce why it's right; if wrong, explain what's off without naming the answer>`, correctAnswer)
+<2-3 sentences, grounded in what they said:
+- If CORRECT: acknowledge the specific part of their answer that nails it ("your point about X is right because…"), then reinforce or extend the concept.
+- If WRONG: name the specific claim or phrase in their answer that's off ("when you said Y, that conflicts with…"), then point toward the right concept without naming the model answer.>`, correctAnswer)
 
 	user := fmt.Sprintf("Question: %s\n\nUser's answer: %s", question, userAnswer)
 

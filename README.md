@@ -23,7 +23,7 @@ go install github.com/LFroesch/unrot@latest
 Or build from source:
 
 ```bash
-make install
+go build -o unrot .
 ```
 
 Command:
@@ -31,14 +31,15 @@ Command:
 ```bash
 unrot
 ```
+
 ## Run
 
-```
-make install       # builds + copies to ~/.local/bin/
-unrot              # dashboard (default 10 questions/session)
+```bash
+unrot              # dashboard (saved setting or default 5 questions/session)
 unrot docker       # drill a specific domain
 unrot -n 5         # quick 5-question session
-unrot -n 0 docker  # unlimited, docker only
+unrot -n 0 docker  # unlimited session, docker only
+./unrot            # run local build from source checkout
 ```
 
 ## Screens
@@ -48,8 +49,18 @@ unrot -n 0 docker  # unlimited, docker only
 - **Quiz** — teach-first flow: lesson → question → grade → result. 10 question types. Rate confidence 1-5 after each.
 - **Learn** — conversational: type a topic, chat with Ollama to clarify, generate structured knowledge doc, review/save/quiz
 - **Challenge** — standalone coding exercises (i from dashboard). Adaptive difficulty, Ollama-graded, full XP integration
+- **Project Scan** — analyze a real repo into `projects/<name>/...` knowledge files with stale-checking and interview-focused docs
+- **Viewer / Recent** — browse knowledge files directly or retry from recent question history
 - **Stats** — domain confidence, streaks, 7-day activity, achievements (31 total)
-- **Settings** — toggle question types on/off
+- **Settings** — toggle question types, session length, challenge difficulty, knowledge path, and Ollama call logging
+
+## A Typical Session
+
+1. Launch `unrot` → dashboard shows your streak, confidence distribution, and daily goal.
+2. Press `r` for smart review (priority order: low confidence + stale + never seen).
+3. For each file: read the lesson → answer the generated question → rate confidence 1-5.
+4. Stuck? `tab` cycles to the chat panel mid-question; `c` opens chat overlay; `k` shows the source file.
+5. After the session: stats update, achievements unlock, optional report exports to `~/.local/share/unrot/reports/`.
 
 ## Controls
 
@@ -61,6 +72,8 @@ unrot -n 0 docker  # unlimited, docker only
 | `b` | dashboard | browse topics |
 | `l` | dashboard | learn something new |
 | `i` | dashboard | challenge mode |
+| `p` | dashboard | project scan |
+| `R` | dashboard | recent questions |
 | `s` | dashboard | settings (quiz types) |
 | `a` | dashboard | stats / achievements |
 | `tab` | dashboard/topics | cycle domain filter |
@@ -87,9 +100,9 @@ unrot -n 0 docker  # unlimited, docker only
 | `esc` | everywhere | back one level |
 | `q` | dashboard | quit |
 
-## Question Types (10)
+## Question Types (13)
 
-flashcard, explain, fill-blank, finish-code, multiple-choice, compare, scenario, ordering, code-output, debug — all toggleable in settings.
+flashcard, explain, fill-blank, finish-code, multiple-choice, compare, scenario, ordering, code-output, debug, decision, architecture, refactor — all toggleable in settings. Multiple-choice and ordering auto-grade; the rest are graded by Ollama.
 
 ## Knowledge Files
 

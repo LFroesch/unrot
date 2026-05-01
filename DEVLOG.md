@@ -1,5 +1,40 @@
 ## DevLog
 
+### 2026-04-27: Topic list full-width cursor bar + expanded help
+- Selected row in browse-topics now pads to full terminal width with bg color (was capped at ~52 cols)
+- Help screen (`?`) reorganized into grouped sections: Global, Dashboard, Topic list, Quiz question, Quiz result, Chat/Knowledge, Learn/Project/Challenge
+- Added previously undocumented keys to help: `ctrl+b/y/l`, `ctrl+s`, `1-5`, `a/b/c/d`, `ctrl+g/r/e`, `f/x/+/w/r/F/R/i/I/p/v`
+- `view.go:renderTopicList`, `view.go:renderHelp`
+
+### 2026-04-27: `q` as universal back/cancel alias for `esc`
+- `q` now mirrors `esc` everywhere a text input isn't focused: recent zone, topic list, lesson, quiz loading/grading, knowledge tab, MC question, result, knowledge/domain overlays, learn generating/review, viewer, settings, stats, challenge loading/grading, challenge problem tab, challenge result (non-chat), project sub-states, error
+- Skipped (textarea active): chat overlay, notes overlay, answer textarea on typed questions, learn input/chat, challenge code/chat tabs, challenge input/chat, project repo input, settings brain-path edit
+- Dashboard `q` retained as quit (no "back" target from home); `ctrl+c` still force-quits
+- Removed redundant `case "q"` in lesson handler now that `esc, q` share the skipToNextFile path
+- `update.go`, `CLAUDE.md`
+
+### 2026-04-18: Topic list — tighter rows, cursor bar, centered suffix column
+- Removed blank-line gap between domain groups and the extra spacer line above the list
+- Added a row background highlight on the selected file (color 237) so the cursor is visually obvious
+- Capped the name column to 28 chars so the confidence dots + "Xd ago" suffix sits roughly in the middle of the row instead of pinned to the right edge
+- Narrow-terminal fallback (ww < 60) keeps the old proportional layout
+- `view.go:renderTopicList`
+
+### 2026-04-18: Softer grading, feedback grounded in user's wording
+- Reworked `GradeAnswer` and `GradeFinishCode` system prompts in `internal/ollama/ollama.go`
+- Added explicit grading philosophy ("learning tool, not an exam/compiler — lean toward CORRECT")
+- Feedback must reference the user's actual wording/code (quote or paraphrase their phrasing) so it reads as a response to what they said, not a generic rubric
+- Tightened WRONG criteria: only for true semantic errors / missed core concept, not style or incompleteness
+
+### 2026-04-18: UI sweep, width regressions, docs cleanup
+- Tightened width handling for the header bar so left/right metadata no longer drift or overflow as easily on narrower terminals
+- Reworked topic list rows to use stable name/suffix columns and improved stats domain table alignment
+- Wrapped long settings values and descriptions (knowledge path, debug log path, enrichment text) so settings stays readable without assuming a wide terminal
+- Added regression tests for width-sensitive helper/render behavior in the main package
+- Fixed README inaccuracies: removed `make install`, corrected the default session wording, documented project scan/recent flows, and expanded the settings description
+- Naming decision for this pass: keep `unrot` for now; no binary/path rename yet
+- Key files: `helpers.go`, `view.go`, `update.go`, `helpers_test.go`, `README.md`, `WORK.md`
+
 ### 2026-04-05: v60 — Interview mode, difficulty gating fix, project prompt fixes
 - `I` on dashboard: interview mode — reviews all `projects/` files with decision/architecture/refactor types only
 - `savedActiveTypes` restores user's quiz type config on `goHome()`

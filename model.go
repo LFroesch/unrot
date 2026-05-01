@@ -389,12 +389,13 @@ type model struct {
 	sessionRecordIdx int
 
 	// UI components
-	spinner  spinner.Model
-	viewport viewport.Model
-	width    int
-	height   int
-	err      error
-	showHelp bool
+	spinner      spinner.Model
+	viewport     viewport.Model
+	helpViewport viewport.Model
+	width        int
+	height       int
+	err          error
+	showHelp     bool
 }
 
 // Bubbleup alert type keys
@@ -455,6 +456,7 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 
 	vp := viewport.New(80, 20)
 	ovp := viewport.New(60, 15)
+	hvp := viewport.New(80, 20)
 
 	allOn := make([]bool, len(ollama.AllTypes))
 	for i := range allOn {
@@ -483,6 +485,7 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 		pickSearch:       searchTI,
 		viewport:         vp,
 		overlayViewport:  ovp,
+		helpViewport:     hvp,
 		sessionDomains:   make(map[string]bool),
 		sessionRecordIdx: -1,
 		activeTypes:      allOn,
