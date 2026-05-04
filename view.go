@@ -699,7 +699,9 @@ func (m model) renderTopicList() string {
 
 		row := cursorCol + favMark + nameText + "  " + suffixText
 		if selected {
-			barW := m.width - 4
+			// Keep the selected-row highlight within the same wrapped content width
+			// as the rest of the topic list instead of bleeding into panel padding.
+			barW := ww + 2
 			if barW < lipgloss.Width(row)+2 {
 				barW = lipgloss.Width(row) + 2
 			}
@@ -1878,6 +1880,39 @@ func (m model) renderSettings() string {
 		}
 	}
 
+	// Model setting
+	b.WriteString("\n")
+	b.WriteString(divider("ollama model", ww))
+	b.WriteString("\n\n")
+
+	idxModel := len(ollama.AllTypes) + 3
+	if m.settingsEditing && m.settingsCursor == idxModel {
+		b.WriteString(fmt.Sprintf("  %s %s\n", cursorStyle.Render(">"), m.learnTA.View()))
+	} else {
+		modelValue := m.ollama.Model()
+		if strings.TrimSpace(modelValue) == "" {
+			modelValue = ollama.DefaultModel
+		}
+		cursor := "  "
+		if m.settingsCursor == idxModel {
+			cursor = cursorStyle.Render("> ")
+		}
+		b.WriteString("  " + cursor + labelStyle.Render("current model") + "\n")
+		style := dimStyle
+		if m.settingsCursor == idxModel {
+			style = lipgloss.NewStyle().Foreground(colorText)
+		}
+		b.WriteString(style.PaddingLeft(4).Width(ww).Render(modelValue) + "\n")
+		if os.Getenv("UNROT_MODEL") != "" {
+			b.WriteString(dimStyle.PaddingLeft(4).Width(ww).Render("env override active via UNROT_MODEL") + "\n")
+		} else if strings.TrimSpace(m.state.Model) == "" {
+			b.WriteString(dimStyle.PaddingLeft(4).Width(ww).Render("blank = default "+ollama.DefaultModel) + "\n")
+		}
+		if m.settingsCursor == idxModel {
+			b.WriteString("    " + dimStyle.Render("enter to edit") + "\n")
+		}
+	}
+
 	// Enrich knowledge base
 	b.WriteString("\n")
 	b.WriteString(divider("knowledge enrichment", ww))
@@ -1904,7 +1939,7 @@ func (m model) renderSettings() string {
 	b.WriteString(divider("debug", ww))
 	b.WriteString("\n\n")
 
-	idxLogCalls := len(ollama.AllTypes) + 3
+	idxLogCalls := len(ollama.AllTypes) + 4
 	logOn := m.state != nil && m.state.LogCalls
 	logMarker := dimStyle.Render("○")
 	logLabel := "log ollama calls to file"

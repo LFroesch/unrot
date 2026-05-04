@@ -164,8 +164,8 @@ type projectStaleInfo struct {
 }
 
 type chatEntry struct {
-	role       string // "user" or "assistant"
-	content    string
+	role        string // "user" or "assistant"
+	content     string
 	durationSec float64 // seconds to receive response (assistant only)
 }
 
@@ -458,16 +458,11 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 	ovp := viewport.New(60, 15)
 	hvp := viewport.New(80, 20)
 
-	allOn := make([]bool, len(ollama.AllTypes))
-	for i := range allOn {
-		allOn[i] = true
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return model{
 		brainPath:        brainPath,
-		ollama:           ollama.New(),
+		ollama:           ollama.New(""),
 		ollamaCtx:        ctx,
 		cancelOllama:     cancel,
 		cliDomain:        domainFilter,
@@ -488,10 +483,58 @@ func initialModel(brainPath, domainFilter string, maxQuestions, dailyGoal int) m
 		helpViewport:     hvp,
 		sessionDomains:   make(map[string]bool),
 		sessionRecordIdx: -1,
-		activeTypes:      allOn,
+		activeTypes:      defaultActiveTypes(),
 		sessionMinConf:   6, // higher than max so first rating always sets it
 		chatStreamBuf:    "",
 	}
+}
+
+func defaultActiveTypes() []bool {
+	active := make([]bool, len(ollama.AllTypes))
+	for i, t := range ollama.AllTypes {
+		switch t {
+		case ollama.TypeFlashcard, ollama.TypeExplain, ollama.TypeMultiChoice, ollama.TypeFillBlank:
+			active[i] = true
+		}
+	}
+	return active
+}
+
+func activeTypeNames(active []bool) []string {
+	var names []string
+	for i, on := range active {
+		if on && i < len(ollama.AllTypes) {
+			names = append(names, ollama.AllTypes[i].String())
+		}
+	}
+	return names
+}
+
+func activeTypesFromNames(names []string) []bool {
+	active := make([]bool, len(ollama.AllTypes))
+	if len(names) == 0 {
+		for i := range active {
+			active[i] = true
+		}
+		return active
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		seen[name] = true
+	}
+	for i, t := range ollama.AllTypes {
+		active[i] = seen[t.String()]
+	}
+	return active
+}
+
+func (m *model) rebuildOllamaClient() {
+	savedModel := ""
+	if m.state != nil {
+		savedModel = m.state.Model
+	}
+	m.ollama = ollama.New(savedModel)
+	applyCallLogger(m)
 }
 
 // newOllamaCtx cancels any in-flight ollama request and creates a fresh context for the next one.

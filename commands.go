@@ -26,6 +26,11 @@ type stateLoadedMsg struct {
 	pathHint  string // optional toast explaining why path is rejected
 }
 
+type ollamaHealthMsg struct {
+	host string
+	err  error
+}
+
 type questionMsg struct {
 	question *ollama.Question
 	file     string
@@ -55,7 +60,7 @@ type lessonMsg struct {
 }
 
 type conceptChatMsg struct {
-	text       string
+	text        string
 	durationSec float64
 }
 
@@ -154,6 +159,15 @@ func loadState(brainPath string) tea.Cmd {
 		}
 		graph, _ := knowledge.BuildGraph(brainPath, files)
 		return stateLoadedMsg{state: s, files: files, graph: graph}
+	}
+}
+
+func checkOllamaHealth(client *ollama.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		err := client.Ping(ctx)
+		return ollamaHealthMsg{host: client.Host(), err: err}
 	}
 }
 
@@ -852,8 +866,8 @@ func listRepoTree(repoPath string) string {
 func readProjectContext(repoPath string) string {
 	candidates := []string{
 		"CLAUDE.md", "AGENTS.md", "COPILOT.md", "CURSOR.md", // AI agent docs
-		"README.md", "README.rst", "README.txt", "README",   // readmes
-		"CONTRIBUTING.md", "ARCHITECTURE.md", "DESIGN.md",    // project docs
+		"README.md", "README.rst", "README.txt", "README", // readmes
+		"CONTRIBUTING.md", "ARCHITECTURE.md", "DESIGN.md", // project docs
 		"Makefile", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", // build/infra
 	}
 	var parts []string

@@ -1,5 +1,22 @@
 ## DevLog
 
+### 2026-05-04: v1 sprint cleanup + topic list width regression
+- Re-checked `WORK.md` against the current codebase and cut it down to verified v1 blockers: onboarding, generation reliability, and release validation
+- Removed stale/vague notes that were no longer actionable blockers
+- Fixed the topic-list selected-row highlight width so it stays within the wrapped content area again; this restores `go test ./...` to green
+- Corrected the README quiz summary from 10 → 13 question types to match the current codebase
+- Files: `WORK.md`, `README.md`, `view.go`
+
+### 2026-05-04: onboarding + reliability sprint
+- Added startup Ollama liveness checking (`/api/tags`) so launch surfaces a clear "not running" alert instead of failing on first quiz request
+- Added `UNROT_NOTES` as the preferred notes-root env var while keeping `SECOND_BRAIN` as a compatibility alias; updated CLI/docs copy toward "knowledge path" / "notes"
+- Switched fresh installs to a persisted starter quiz-type subset (flashcard, explain, multiple-choice, fill-blank) while preserving all-on behavior for older state files without the new setting
+- Added a saved Ollama model setting in Settings, documented precedence (`UNROT_MODEL` > saved model > built-in default), and rebuilt the client from saved config
+- Moved question generation and grading toward JSON payloads with parser fallback, reducing drift from freeform `Q:`/`A:`/`E:` and grading marker output
+- Generalized `knowledge.Domain()` to use the full folder path under `knowledge/`, so nested domains like `projects/unrot` are conventions rather than one-off parsing rules
+- Added regression coverage for nested domain parsing and JSON response parsing
+- Files: `main.go`, `model.go`, `commands.go`, `update.go`, `view.go`, `internal/state/state.go`, `internal/ollama/ollama.go`, `internal/knowledge/knowledge.go`, `internal/knowledge/knowledge_test.go`, `internal/ollama/json_parse_test.go`, `README.md`, `WORK.md`
+
 ### 2026-04-30: Onboarding fixes for new users
 - README: added "Step 0" Ollama install + `ollama pull qwen2.5:7b` block; corrected `UNROT_MODEL` default from `qwen2.5:3b` → `qwen2.5:7b` to match `ollama.New()`
 - `--brain <path>` CLI flag overrides `SECOND_BRAIN` env and saved state for one-shot use

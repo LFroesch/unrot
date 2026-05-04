@@ -16,7 +16,7 @@ var version = "dev"
 func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	maxQ := flag.Int("n", 0, "max questions per session (0 = use saved setting, default 5)")
-	brainFlag := flag.String("brain", "", "path to knowledge base root (overrides SECOND_BRAIN and saved setting)")
+	brainFlag := flag.String("brain", "", "path to knowledge base root (overrides UNROT_NOTES, SECOND_BRAIN, and saved setting)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "unrot — Quiz TUI for fighting knowledge decay (Ollama-powered)\n\n")
 		fmt.Fprintf(os.Stderr, "Usage: unrot [flags] [domain]\n\n")
@@ -29,6 +29,9 @@ func main() {
 	}
 
 	brainPath := *brainFlag
+	if brainPath == "" {
+		brainPath = os.Getenv("UNROT_NOTES")
+	}
 	if brainPath == "" {
 		brainPath = os.Getenv("SECOND_BRAIN")
 	}

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Discover finds all .md files under the knowledge/ directory of the Second Brain.
+// Discover finds all .md files under the knowledge/ directory of the notes root.
 func Discover(brainPath string) ([]string, error) {
 	knowledgeDir := filepath.Join(brainPath, "knowledge")
 	var files []string
@@ -53,12 +53,15 @@ func WriteFile(brainPath, domain, slug, content string) (string, error) {
 	return relPath, nil
 }
 
-// Domain extracts the domain from a relative path (e.g., "knowledge/linux-cli/foo.md" -> "linux-cli").
-// Special case: "knowledge/projects/unrot/foo.md" -> "projects/unrot" (two-level domain).
+// Domain extracts the folder path under knowledge/ as the domain.
+// Examples:
+// - "knowledge/linux-cli/foo.md" -> "linux-cli"
+// - "knowledge/projects/unrot/foo.md" -> "projects/unrot"
+// - "knowledge/courses/go/basics.md" -> "courses/go"
 func Domain(relPath string) string {
 	parts := strings.Split(relPath, string(filepath.Separator))
-	if len(parts) >= 4 && parts[1] == "projects" {
-		return parts[1] + "/" + parts[2]
+	if len(parts) >= 3 && parts[0] == "knowledge" {
+		return filepath.ToSlash(filepath.Join(parts[1 : len(parts)-1]...))
 	}
 	if len(parts) >= 2 {
 		return parts[1]
@@ -309,7 +312,7 @@ func FormatSource(meta *SourceMeta) string {
 	return b.String()
 }
 
-// IsProjectDomain returns true if the domain is a two-level projects/ domain.
+// IsProjectDomain returns true if the domain is under the projects/ namespace.
 func IsProjectDomain(domain string) bool {
 	return strings.HasPrefix(domain, "projects/")
 }

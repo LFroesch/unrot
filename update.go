@@ -19,7 +19,7 @@ import (
 )
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadState(m.brainPath), m.spinner.Tick, m.alerts.Init())
+	return tea.Batch(loadState(m.brainPath), checkOllamaHealth(m.ollama), m.spinner.Tick, m.alerts.Init())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -96,7 +96,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		firstLoad := !m.loaded
 		m.loaded = true
 		m.state = msg.state
-		applyCallLogger(&m)
+		m.rebuildOllamaClient()
+		if len(m.state.ActiveQTypes) > 0 {
+			m.activeTypes = activeTypesFromNames(m.state.ActiveQTypes)
+		} else if m.state.LoadedFromDisk() {
+			m.activeTypes = activeTypesFromNames(nil)
+		}
 		if msg.needsPath {
 			m.phase = phaseSettings
 			m.settingsCursor = len(ollama.AllTypes) + 2 // brain path row
@@ -125,6 +130,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.toast = "knowledge path updated"
 		}
+		return m, nil
+
+	case ollamaHealthMsg:
+		if msg.err == nil {
+			return m, nil
+		}
+		(&m).queueAlert(alertHint, fmt.Sprintf("Ollama not running at %s", msg.host))
 		return m, nil
 
 	case questionMsg:
@@ -2340,6 +2352,10 @@ func applyCallLogger(m *model) {
 			m.logFile = nil
 		}
 		m.ollama.SetLogger(nil)
+		return
+	}
+	if m.logFile != nil {
+		m.ollama.SetLogger(m.logFile)
 	}
 	// When LogCalls is turned on, the next question/challenge will open a file.
 }
@@ -2418,7 +2434,8 @@ func (m model) handleSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 	idxSession := len(ollama.AllTypes)       // session length row
 	idxChallDiff := len(ollama.AllTypes) + 1 // challenge difficulty row
 	idxBrainPath := len(ollama.AllTypes) + 2 // brain path row
-	idxLogCalls := len(ollama.AllTypes) + 3  // log ollama calls row
+	idxModel := len(ollama.AllTypes) + 3     // model row
+	idxLogCalls := len(ollama.AllTypes) + 4  // log ollama calls row
 	maxIdx := idxLogCalls
 
 	// Brain path editing mode — textarea captures all keys
@@ -2426,14 +2443,26 @@ func (m model) handleSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 		switch key {
 		case "enter":
 			newPath := strings.TrimSpace(m.learnTA.Value())
-			if newPath != "" && newPath != m.brainPath {
-				m.brainPath = newPath
-				m.state.BrainPath = newPath
-				m.state.Save()
-				m.ollama = ollama.New()
-				m.settingsEditing = false
-				m.learnTA.Blur()
-				return m, loadState(m.brainPath)
+			switch m.settingsCursor {
+			case idxBrainPath:
+				if newPath != "" && newPath != m.brainPath {
+					m.brainPath = newPath
+					m.state.BrainPath = newPath
+					m.state.Save()
+					m.settingsEditing = false
+					m.learnTA.Blur()
+					return m, loadState(m.brainPath)
+				}
+			case idxModel:
+				if newPath != m.state.Model {
+					m.state.Model = newPath
+					m.state.Save()
+					m.rebuildOllamaClient()
+					m.queueAlert(alertHint, "model updated")
+					if os.Getenv("UNROT_MODEL") != "" {
+						m.queueAlert(alertHint, "UNROT_MODEL is overriding the saved model")
+					}
+				}
 			}
 			m.settingsEditing = false
 			m.learnTA.Blur()
@@ -2476,6 +2505,8 @@ func (m model) handleSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 			if !anyOn {
 				m.activeTypes[m.settingsCursor] = true
 			}
+			m.state.ActiveQTypes = activeTypeNames(m.activeTypes)
+			m.state.Save()
 		} else if m.settingsCursor == idxChallDiff {
 			// Cycle challenge difficulty: adaptive → basic → intermediate → advanced → adaptive
 			m.state.ChallengeDiff = (m.state.ChallengeDiff + 1) % 4
@@ -2486,6 +2517,13 @@ func (m model) handleSettings(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.learnTA.SetHeight(1)
 			m.learnTA.CharLimit = 500
 			m.learnTA.Placeholder = "path to knowledge files..."
+			m.learnTA.Focus()
+		} else if m.settingsCursor == idxModel {
+			m.settingsEditing = true
+			m.learnTA.SetValue(m.state.Model)
+			m.learnTA.SetHeight(1)
+			m.learnTA.CharLimit = 200
+			m.learnTA.Placeholder = ollama.DefaultModel
 			m.learnTA.Focus()
 		} else if m.settingsCursor == idxLogCalls {
 			m.state.LogCalls = !m.state.LogCalls

@@ -72,7 +72,7 @@ func TestQuestionQuality(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s\n", c.model)
 
 	cases := []struct {
@@ -298,7 +298,7 @@ E: The Go scheduler is cooperative, not preemptive.`,
 			},
 		},
 		{
-			name: "multiline explanation",
+			name:  "multiline explanation",
 			input: "Q: What happens if main() returns while goroutines run?\nA: All goroutines are killed immediately.\nE: When main() returns, the Go runtime tears down everything.\nNo cleanup, no waiting.\nFix: use sync.WaitGroup.",
 			qtype: TypeFlashcard,
 			checkQ: func(q *Question) error {
@@ -312,7 +312,7 @@ E: The Go scheduler is cooperative, not preemptive.`,
 			},
 		},
 		{
-			name: "MC multiline explanation",
+			name:  "MC multiline explanation",
 			input: "Q: What is the cost of creating a goroutine?\nA) ~1MB\nB) ~2KB\nC) ~64KB\nD) ~8KB\nANSWER: B\nE: Goroutines start with a tiny ~2KB stack.\nThis is 500x cheaper than OS threads.",
 			qtype: TypeMultiChoice,
 			checkQ: func(q *Question) error {
@@ -561,7 +561,7 @@ func TestLiveChallenge(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s", c.model)
 
 	diffs := []Difficulty{DiffBasic, DiffIntermediate, DiffAdvanced}

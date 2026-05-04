@@ -80,7 +80,7 @@ func TestPromptEval(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s", c.model)
 
 	var results []evalResult
@@ -229,7 +229,7 @@ func TestPromptEvalGrading(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s", c.model)
 
 	var results []evalResult
@@ -326,7 +326,7 @@ func TestPromptEvalHints(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s", c.model)
 
 	var results []evalResult
@@ -417,7 +417,7 @@ func TestPromptEvalExplanations(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s", c.model)
 
 	var results []evalResult
@@ -505,7 +505,7 @@ func TestPromptEvalChallenges(t *testing.T) {
 		t.Skip("set UNROT_TEST_OLLAMA=1 to run live Ollama tests")
 	}
 
-	c := New()
+	c := New("")
 	t.Logf("Model: %s", c.model)
 
 	var results []evalResult

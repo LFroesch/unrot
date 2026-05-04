@@ -23,6 +23,11 @@ type Client struct {
 	logger io.Writer // optional — logs every request/response when set
 }
 
+const (
+	DefaultHost  = "http://localhost:11434"
+	DefaultModel = "qwen2.5:7b"
+)
+
 // SetLogger enables request/response logging to w (e.g. an open *os.File).
 // Pass nil to disable.
 func (c *Client) SetLogger(w io.Writer) {
@@ -31,24 +36,48 @@ func (c *Client) SetLogger(w io.Writer) {
 	c.logMu.Unlock()
 }
 
-func New() *Client {
+func New(savedModel string) *Client {
 	host := os.Getenv("OLLAMA_HOST")
 	if host == "" {
-		host = "http://localhost:11434"
+		host = DefaultHost
 	} else if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
 		host = "http://" + host
 	}
 	model := os.Getenv("UNROT_MODEL")
 	if model == "" {
-		model = "qwen2.5:7b"
+		model = strings.TrimSpace(savedModel)
+	}
+	if model == "" {
+		model = DefaultModel
 	}
 	return &Client{host: host, model: model, sem: make(chan struct{}, 1)}
+}
+
+func (c *Client) Host() string  { return c.host }
+func (c *Client) Model() string { return c.model }
+
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.host+"/api/tags", nil)
+	if err != nil {
+		return fmt.Errorf("ollama request failed: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
 }
 
 type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []message `json:"messages"`
 	Stream   bool      `json:"stream"`
+	Format   any       `json:"format,omitempty"`
 }
 
 type message struct {
@@ -187,15 +216,20 @@ func (c *Client) GenerateQuestion(ctx context.Context, content, filename string,
 		qtype = AllTypes[rand.Intn(len(AllTypes))]
 	}
 
-	system := promptFor(qtype, diff)
 	user := fmt.Sprintf("Document: %s\n\n%s", filename, content)
 
-	resp, err := c.Chat(ctx, system, user)
+	resp, err := c.chatMultiWithFormat(ctx, []message{
+		{Role: "system", Content: questionJSONPromptFor(qtype, diff)},
+		{Role: "user", Content: user},
+	}, "json")
 	if err != nil {
 		return nil, err
 	}
 
-	q, err := parseResponse(resp, qtype)
+	q, err := parseQuestionJSON(resp, qtype)
+	if err != nil {
+		q, err = parseResponse(resp, qtype)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -353,6 +387,54 @@ VARIETY & QUALITY:
 
 func explanationClause() string {
 	return `E: <explanation — TEACH the concept in 2-4 sentences. Include a concrete example (code, input→output, or before→after). Explain WHY, not just WHAT. Must be factually correct. Can span multiple lines. DO NOT GIVE AWAY THE ANSWER IN THE EXPLANATION.>`
+}
+
+func questionJSONPromptFor(t QuestionType, diff Difficulty) string {
+	dc := difficultyClause(diff)
+
+	base := fmt.Sprintf(`Generate ONE quiz question from the document below.
+%s
+
+Return ONLY valid JSON with these keys:
+- question: string
+- answer: string
+- explanation: string
+`, dc)
+
+	switch t {
+	case TypeMultiChoice, TypeOrdering:
+		return base + `- options: array of 4 strings
+- correct_index: integer 0-3
+
+Rules:
+- question must be specific and grounded in the document
+- answer should match options[correct_index]
+- explanation should teach the concept without saying "the correct answer is..."
+- multiple-choice/ordering wrong options must be plausible`
+	case TypeFinishCode:
+		return base + `Rules:
+- question must be the code snippet, with one missing line replaced by "// ???"
+- do not use markdown code fences
+- answer is the missing line only`
+	case TypeCodeOutput:
+		return base + `Rules:
+- question should include a short code snippet and ask what it outputs
+- do not use markdown code fences
+- answer must be the exact output/value`
+	case TypeDebug:
+		return base + `Rules:
+- question should include a short buggy code snippet
+- do not use markdown code fences
+- answer must explain the bug and the fix in 1-2 sentences`
+	case TypeFillBlank:
+		return base + `Rules:
+- question must contain ___ exactly once
+- answer must be the missing word or short phrase`
+	default:
+		return base + `Rules:
+- question must fit the requested question style
+- answer should be concise and concrete`
+	}
 }
 
 func promptFor(t QuestionType, diff Difficulty) string {
@@ -757,6 +839,10 @@ func (c *Client) Chat(ctx context.Context, system, user string) (string, error) 
 }
 
 func (c *Client) chatMulti(ctx context.Context, messages []message) (string, error) {
+	return c.chatMultiWithFormat(ctx, messages, nil)
+}
+
+func (c *Client) chatMultiWithFormat(ctx context.Context, messages []message, format any) (string, error) {
 	c.sem <- struct{}{}
 	defer func() { <-c.sem }()
 
@@ -764,6 +850,7 @@ func (c *Client) chatMulti(ctx context.Context, messages []message) (string, err
 		Model:    c.model,
 		Messages: messages,
 		Stream:   false,
+		Format:   format,
 	}
 
 	data, err := json.Marshal(body)
@@ -814,6 +901,47 @@ func (c *Client) chatMulti(ctx context.Context, messages []message) (string, err
 	}
 
 	return result, nil
+}
+
+type questionJSONResponse struct {
+	Question    string   `json:"question"`
+	Answer      string   `json:"answer"`
+	Explanation string   `json:"explanation"`
+	Options     []string `json:"options"`
+	CorrectIdx  int      `json:"correct_index"`
+}
+
+func parseQuestionJSON(text string, qtype QuestionType) (*Question, error) {
+	text = stripOuterFence(stripCodeFences(strings.TrimSpace(text)))
+	var qr questionJSONResponse
+	if err := json.Unmarshal([]byte(text), &qr); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(qr.Question) == "" || strings.TrimSpace(qr.Answer) == "" {
+		return nil, fmt.Errorf("missing question or answer")
+	}
+	q := &Question{
+		Type:        qtype,
+		Text:        strings.TrimSpace(qr.Question),
+		Answer:      strings.TrimSpace(qr.Answer),
+		Explanation: strings.TrimSpace(qr.Explanation),
+	}
+	if qtype == TypeMultiChoice || qtype == TypeOrdering {
+		if len(qr.Options) != 4 || qr.CorrectIdx < 0 || qr.CorrectIdx >= len(qr.Options) {
+			return nil, fmt.Errorf("invalid options payload")
+		}
+		q.Options = qr.Options
+		q.CorrectIdx = qr.CorrectIdx
+		q.Answer = strings.TrimSpace(qr.Options[qr.CorrectIdx])
+	}
+	if qtype == TypeFillBlank && !strings.Contains(q.Text, "___") {
+		lq := strings.ToLower(q.Text)
+		la := strings.ToLower(q.Answer)
+		if idx := strings.Index(lq, la); idx >= 0 {
+			q.Text = q.Text[:idx] + "___" + q.Text[idx+len(q.Answer):]
+		}
+	}
+	return q, nil
 }
 
 func parseResponse(text string, qtype QuestionType) (*Question, error) {
@@ -1090,22 +1218,30 @@ Rules:
 - Only mark WRONG for actual semantic errors: wrong behavior, missing critical keywords, or broken logic. Don't mark wrong for cosmetic drift.
 - Ground feedback in what the USER actually wrote. Quote or reference their specific code ("your use of X", "when you wrote Y") so they know you read it.
 
-Output EXACTLY this format:
-CORRECT: <yes/no>
----
-<2-3 sentences of feedback, grounded in their code:
-- If CORRECT: point to the specific line/keyword they used and explain why it works here. Reinforce the concept.
-- If WRONG: reference the specific part of their code that's off ("your call to X would…", "the way you used Y…"), describe what it would actually do, then give a directional hint — do NOT name or quote the correct answer.>
+Return JSON with:
+- correct: boolean
+- feedback: string
+
+Feedback must be 2-3 sentences, grounded in their code:
+- If correct: point to the specific line/keyword they used and explain why it works here. Reinforce the concept.
+- If wrong: reference the specific part of their code that's off ("your call to X would…", "the way you used Y…"), describe what it would actually do, then give a directional hint — do NOT name or quote the correct answer.
 
 CRITICAL: Never reveal the model answer, never say "the answer is", never quote or paraphrase the expected line.`, snippet, expectedLine)
 
 	user := fmt.Sprintf("User's code: %s", userAnswer)
 
-	resp, err := c.Chat(ctx, system, user)
+	resp, err := c.chatMultiWithFormat(ctx, []message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, "json")
 	if err != nil {
 		return nil, err
 	}
-	return parseAnswerGrade(resp)
+	grade, err := parseAnswerGradeJSON(resp)
+	if err != nil {
+		return parseAnswerGrade(resp)
+	}
+	return grade, nil
 }
 
 // GradeAnswer evaluates a typed answer against the correct answer.
@@ -1120,20 +1256,40 @@ Rules:
 - Ground your feedback in what the USER actually wrote. Reference their wording — quote or paraphrase a phrase from their answer so they know you read it.
 - If wrong: do NOT reveal the model answer. Point at what's off in their reasoning and guide them toward the right concept.
 
-Output EXACTLY:
-CORRECT: <yes/no>
----
-<2-3 sentences, grounded in what they said:
-- If CORRECT: acknowledge the specific part of their answer that nails it ("your point about X is right because…"), then reinforce or extend the concept.
-- If WRONG: name the specific claim or phrase in their answer that's off ("when you said Y, that conflicts with…"), then point toward the right concept without naming the model answer.>`, correctAnswer)
+Return JSON with:
+- correct: boolean
+- feedback: string
+
+Feedback must be 2-3 sentences, grounded in what they said:
+- If correct: acknowledge the specific part of their answer that nails it ("your point about X is right because…"), then reinforce or extend the concept.
+- If wrong: name the specific claim or phrase in their answer that's off ("when you said Y, that conflicts with…"), then point toward the right concept without naming the model answer.`, correctAnswer)
 
 	user := fmt.Sprintf("Question: %s\n\nUser's answer: %s", question, userAnswer)
 
-	resp, err := c.Chat(ctx, system, user)
+	resp, err := c.chatMultiWithFormat(ctx, []message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, "json")
 	if err != nil {
 		return nil, err
 	}
-	return parseAnswerGrade(resp)
+	grade, err := parseAnswerGradeJSON(resp)
+	if err != nil {
+		return parseAnswerGrade(resp)
+	}
+	return grade, nil
+}
+
+func parseAnswerGradeJSON(text string) (*AnswerGrade, error) {
+	text = stripOuterFence(stripCodeFences(strings.TrimSpace(text)))
+	var grade AnswerGrade
+	if err := json.Unmarshal([]byte(text), &grade); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(grade.Feedback) == "" {
+		return nil, fmt.Errorf("missing feedback")
+	}
+	return &grade, nil
 }
 
 func parseAnswerGrade(text string) (*AnswerGrade, error) {
@@ -1178,20 +1334,38 @@ Feedback rules:
 - If correct but improvable: say what's good, then point out the one most impactful improvement
 - 3-6 sentences, direct and technical
 
-Output EXACTLY this format:
-SCORE: <0-100>
-CORRECT: <yes/no>
-EFFICIENCY: <optimal/acceptable/suboptimal>
----
-<feedback>`
+Return JSON with:
+- score: integer 0-100
+- correct: boolean
+- efficiency: "optimal" | "acceptable" | "suboptimal"
+- feedback: string`
 
 	user := fmt.Sprintf("Challenge: %s\n\n%s\n\nSubmitted code:\n%s", challenge.Title, challenge.Description, code)
 
-	resp, err := c.Chat(ctx, system, user)
+	resp, err := c.chatMultiWithFormat(ctx, []message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, "json")
 	if err != nil {
 		return nil, err
 	}
-	return parseChallengeGrade(resp)
+	grade, err := parseChallengeGradeJSON(resp)
+	if err != nil {
+		return parseChallengeGrade(resp)
+	}
+	return grade, nil
+}
+
+func parseChallengeGradeJSON(text string) (*ChallengeGrade, error) {
+	text = stripOuterFence(stripCodeFences(strings.TrimSpace(text)))
+	var grade ChallengeGrade
+	if err := json.Unmarshal([]byte(text), &grade); err != nil {
+		return nil, err
+	}
+	if grade.Score == 0 && strings.TrimSpace(grade.Feedback) == "" {
+		return nil, fmt.Errorf("missing score/feedback")
+	}
+	return &grade, nil
 }
 
 func parseChallenge(text string, diff Difficulty) (*Challenge, error) {
@@ -1436,8 +1610,6 @@ slug — description
 	return proposals, nil
 }
 
-
-
 // ExtractFileNotes reads a source file and extracts key information for a subsystem,
 // building on accumulated notes from previously processed files.
 func (c *Client) ExtractFileNotes(ctx context.Context, fileName, fileContent, runningNotes, subsystem string) (string, error) {
@@ -1527,4 +1699,3 @@ Rules:
 	}
 	return stripOuterFence(resp), nil
 }
-

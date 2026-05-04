@@ -1,6 +1,6 @@
 # unrot
 
-Quiz TUI that fights knowledge decay. Confidence-based review with Ollama-generated questions from Second Brain knowledge files. XP/leveling, achievements, open-notes testing, conversational learn flow, standalone coding challenges. Daily streaks keep you coming back.
+Quiz TUI that fights knowledge decay. Confidence-based review with Ollama-generated questions from local knowledge files. XP/leveling, achievements, open-notes testing, conversational learn flow, standalone coding challenges. Daily streaks keep you coming back.
 
 ## Quick Install
 
@@ -14,7 +14,7 @@ unrot generates and grades questions via a local [Ollama](https://ollama.com) da
 ollama pull qwen2.5:7b
 ```
 
-Other models work — set `UNROT_MODEL` to override. Smaller models are faster but produce weaker questions/grading.
+Other models work — set `UNROT_MODEL` to override, or save a default in Settings. Smaller models are faster but produce weaker questions/grading.
 
 ### 1. Install unrot
 
@@ -35,7 +35,7 @@ go install github.com/LFroesch/unrot@latest
 Or build from source:
 
 ```bash
-go build -o unrot .
+make install
 ```
 
 Command:
@@ -59,13 +59,13 @@ unrot --brain ~/notes       # one-shot override of knowledge path
 
 - **Dashboard** — streak, confidence distribution, domain filter (tab), quick actions, recent sessions, daily goal progress
 - **Topic List** — browse/search knowledge files with domain tabs, confidence dots, staleness labels, favorites (f to toggle)
-- **Quiz** — teach-first flow: lesson → question → grade → result. 10 question types. Rate confidence 1-5 after each.
+- **Quiz** — teach-first flow: lesson → question → grade → result. 13 question types. Rate confidence 1-5 after each.
 - **Learn** — conversational: type a topic, chat with Ollama to clarify, generate structured knowledge doc, review/save/quiz
 - **Challenge** — standalone coding exercises (i from dashboard). Adaptive difficulty, Ollama-graded, full XP integration
 - **Project Scan** — analyze a real repo into `projects/<name>/...` knowledge files with stale-checking and interview-focused docs
 - **Viewer / Recent** — browse knowledge files directly or retry from recent question history
 - **Stats** — domain confidence, streaks, 7-day activity, achievements (31 total)
-- **Settings** — toggle question types, session length, challenge difficulty, knowledge path, and Ollama call logging
+- **Settings** — toggle question types, session length, challenge difficulty, knowledge path, Ollama model, and Ollama call logging
 
 ## A Typical Session
 
@@ -119,7 +119,7 @@ flashcard, explain, fill-blank, finish-code, multiple-choice, compare, scenario,
 
 ## Knowledge Files
 
-Markdown files in `SECOND_BRAIN/knowledge/<domain>/<slug>.md`. Standard sections:
+Markdown files live under `<notes-root>/knowledge/<domain>/<slug>.md`. Domains can be nested, so project docs like `knowledge/projects/unrot/state-machine.md` resolve to the `projects/unrot` domain. Standard sections:
 
 - Content sections (headers, code blocks, gotchas)
 - `## Connections` — related concepts + prerequisite declarations
@@ -142,23 +142,29 @@ Domain interleaving ensures no more than 2 consecutive same-domain files per ses
 
 ## Setup
 
-Set `SECOND_BRAIN` to the root of your knowledge base (parent of `knowledge/`):
+Set `UNROT_NOTES` to the root of your knowledge base (parent of `knowledge/`):
 
 ```bash
 # in ~/.zshrc or ~/.bashrc
-export SECOND_BRAIN="$HOME/path/to/your/second-brain"
+export UNROT_NOTES="$HOME/path/to/your/notes"
 ```
 
-Or skip the env var — on first launch unrot opens settings where you can set the path. It's saved to `state.json` so you only do it once.
+`SECOND_BRAIN` still works as a legacy alias. Or skip env vars entirely — on first launch unrot opens settings where you can set the path. It's saved to `state.json` so you only do it once.
 
 ## Config
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `SECOND_BRAIN` | (none — set via env or settings) | Path to Second Brain root |
+| `UNROT_NOTES` | (none — set via env or settings) | Path to your notes root |
+| `SECOND_BRAIN` | (legacy alias) | Backward-compatible alias for `UNROT_NOTES` |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama endpoint |
-| `UNROT_MODEL` | `qwen2.5:7b` | Model for question generation |
+| `UNROT_MODEL` | `qwen2.5:7b` | Overrides the saved/default Ollama model |
 | `UNROT_DAILY_GOAL` | (unset) | Daily question goal (shows progress bar) |
+
+Model precedence:
+1. `UNROT_MODEL`
+2. Saved Settings model
+3. Built-in default `qwen2.5:7b`
 
 ## State
 

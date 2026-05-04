@@ -71,8 +71,8 @@ const (
 	AchEncyclopedia = "encyclopedia" // 100+ knowledge files
 
 	// Domains
-	AchExplorer  = "explorer"  // 3+ domains in one session
-	AchPolyglot  = "polyglot"  // 5+ domains in one session
+	AchExplorer   = "explorer"   // 3+ domains in one session
+	AchPolyglot   = "polyglot"   // 5+ domains in one session
 	AchSpecialist = "specialist" // all files in a domain at confidence 4+
 
 	// Confidence
@@ -125,8 +125,8 @@ var AchievementInfo = map[string]struct{ Name, Desc string }{
 	AchLibrarian:    {"Librarian", "25+ knowledge files in your bank"},
 	AchEncyclopedia: {"Encyclopedia", "100+ knowledge files"},
 	// Domains
-	AchExplorer:  {"Explorer", "3+ domains in one session"},
-	AchPolyglot:  {"Polyglot", "5+ domains in one session"},
+	AchExplorer:   {"Explorer", "3+ domains in one session"},
+	AchPolyglot:   {"Polyglot", "5+ domains in one session"},
 	AchSpecialist: {"Specialist", "mastered a domain (all files 4+)"},
 	// Confidence
 	AchFirstLock: {"Locksmith", "first file at confidence 5"},
@@ -199,41 +199,48 @@ type RecentQuestion struct {
 
 // stateJSON is the on-disk format.
 type stateJSON struct {
-	Files            map[string]*FileState `json:"files"`
-	Sessions         []SessionRecord       `json:"sessions"`
-	DayStreak        int                   `json:"day_streak"`
-	LastSessionDate  string                `json:"last_session_date"`
-	TotalXP          int                   `json:"total_xp"`
-	TotalQuestions   int                   `json:"total_questions"`
-	Achievements     []string              `json:"achievements,omitempty"`
-	Favorites        []string              `json:"favorites,omitempty"`
-	MaxQuestions     int                   `json:"max_questions,omitempty"`
-	ChallengeDiff    int                   `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
-	BrainPath        string                `json:"brain_path,omitempty"`
-	LogCalls         bool                  `json:"log_calls,omitempty"`
-	TotalChallenges  int                   `json:"total_challenges,omitempty"`
-	NotesBanked      int                   `json:"notes_banked,omitempty"`
-	RecentQuestions  []RecentQuestion      `json:"recent_questions,omitempty"`
+	Files           map[string]*FileState `json:"files"`
+	Sessions        []SessionRecord       `json:"sessions"`
+	DayStreak       int                   `json:"day_streak"`
+	LastSessionDate string                `json:"last_session_date"`
+	TotalXP         int                   `json:"total_xp"`
+	TotalQuestions  int                   `json:"total_questions"`
+	Achievements    []string              `json:"achievements,omitempty"`
+	Favorites       []string              `json:"favorites,omitempty"`
+	MaxQuestions    int                   `json:"max_questions,omitempty"`
+	ChallengeDiff   int                   `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	BrainPath       string                `json:"brain_path,omitempty"`
+	Model           string                `json:"model,omitempty"`
+	ActiveQTypes    []string              `json:"active_question_types,omitempty"`
+	LogCalls        bool                  `json:"log_calls,omitempty"`
+	TotalChallenges int                   `json:"total_challenges,omitempty"`
+	NotesBanked     int                   `json:"notes_banked,omitempty"`
+	RecentQuestions []RecentQuestion      `json:"recent_questions,omitempty"`
 }
 
 type State struct {
-	Files            map[string]*FileState
-	Sessions         []SessionRecord
-	DayStreak        int
-	LastSessionDate  string // "2006-01-02"
-	TotalXP          int
-	TotalQuestions   int
-	Achievements     []string
-	Favorites        map[string]bool
-	MaxQuestions     int    // 0 = use default (5)
-	ChallengeDiff    int    // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
-	BrainPath        string // user-configured knowledge path
-	LogCalls         bool   // log all ollama requests/responses to file
-	TotalChallenges  int    // lifetime challenges completed
-	NotesBanked      int    // lifetime notes banked from chat
-	RecentQuestions  []RecentQuestion // last 10 answered questions
-	path             string
+	Files           map[string]*FileState
+	Sessions        []SessionRecord
+	DayStreak       int
+	LastSessionDate string // "2006-01-02"
+	TotalXP         int
+	TotalQuestions  int
+	Achievements    []string
+	Favorites       map[string]bool
+	MaxQuestions    int              // 0 = use default (5)
+	ChallengeDiff   int              // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	BrainPath       string           // user-configured knowledge path
+	Model           string           // saved Ollama model name (env vars still override)
+	ActiveQTypes    []string         // saved enabled quiz question types
+	LogCalls        bool             // log all ollama requests/responses to file
+	TotalChallenges int              // lifetime challenges completed
+	NotesBanked     int              // lifetime notes banked from chat
+	RecentQuestions []RecentQuestion // last 10 answered questions
+	path            string
+	loadedFromDisk  bool
 }
+
+var DefaultQuestionTypes = []string{"flashcard", "explain", "multiple-choice", "fill-blank"}
 
 func Load() (*State, error) {
 	home, err := os.UserHomeDir()
@@ -247,8 +254,9 @@ func Load() (*State, error) {
 	p := filepath.Join(dir, "state.json")
 
 	s := &State{
-		Files: make(map[string]*FileState),
-		path:  p,
+		Files:        make(map[string]*FileState),
+		path:         p,
+		ActiveQTypes: append([]string(nil), DefaultQuestionTypes...),
 	}
 
 	data, err := os.ReadFile(p)
@@ -258,6 +266,7 @@ func Load() (*State, error) {
 		}
 		return nil, err
 	}
+	s.loadedFromDisk = true
 
 	// Try v2 format first
 	var v2 stateJSON
@@ -288,6 +297,12 @@ func Load() (*State, error) {
 	s.MaxQuestions = v2.MaxQuestions
 	s.ChallengeDiff = v2.ChallengeDiff
 	s.BrainPath = v2.BrainPath
+	s.Model = v2.Model
+	if len(v2.ActiveQTypes) > 0 {
+		s.ActiveQTypes = append([]string(nil), v2.ActiveQTypes...)
+	} else {
+		s.ActiveQTypes = nil
+	}
 	s.LogCalls = v2.LogCalls
 	s.TotalChallenges = v2.TotalChallenges
 	s.NotesBanked = v2.NotesBanked
@@ -345,6 +360,8 @@ func (s *State) Save() error {
 		MaxQuestions:    s.MaxQuestions,
 		ChallengeDiff:   s.ChallengeDiff,
 		BrainPath:       s.BrainPath,
+		Model:           s.Model,
+		ActiveQTypes:    s.ActiveQTypes,
 		LogCalls:        s.LogCalls,
 		TotalChallenges: s.TotalChallenges,
 		NotesBanked:     s.NotesBanked,
@@ -355,6 +372,11 @@ func (s *State) Save() error {
 		return err
 	}
 	return os.WriteFile(s.path, data, 0644)
+}
+
+// LoadedFromDisk reports whether the state file existed on disk.
+func (s *State) LoadedFromDisk() bool {
+	return s != nil && s.loadedFromDisk
 }
 
 // AddRecentQuestion prepends a question to the recent list (max 10).
@@ -610,7 +632,7 @@ func (s *State) WeekActivity() [7]int {
 	var counts [7]int
 	now := time.Now()
 	for i := 0; i < 7; i++ {
-		day := now.AddDate(0, 0, -(6-i)).Format("2006-01-02")
+		day := now.AddDate(0, 0, -(6 - i)).Format("2006-01-02")
 		for _, sr := range s.Sessions {
 			if sr.Date == day {
 				counts[i] += sr.Total
@@ -931,8 +953,8 @@ type XPBreakdown struct {
 	Confidence       int
 	Difficulty       int
 	Staleness        int
-	Bonus            int     // casino bonus drop
-	StreakMultiplier  float64
+	Bonus            int // casino bonus drop
+	StreakMultiplier float64
 	Total            int
 }
 
