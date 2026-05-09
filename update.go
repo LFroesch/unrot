@@ -65,12 +65,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if m.width < minTerminalWidth {
-			m.width = minTerminalWidth
-		}
-		if m.height < minTerminalHeight {
-			m.height = minTerminalHeight
-		}
 		m.syncViewport()
 		m.overlayViewport.Width = m.width - 16
 		m.overlayViewport.Height = m.height - 10
@@ -134,6 +128,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ollamaHealthMsg:
 		if msg.err == nil {
+			return m, nil
+		}
+		if isDemoMode() {
+			(&m).queueAlert(alertHint, demoOllamaMessage())
 			return m, nil
 		}
 		(&m).queueAlert(alertHint, fmt.Sprintf("Ollama not running at %s", msg.host))
@@ -628,6 +626,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		if context.Cause(m.ollamaCtx) != nil || msg.err == context.Canceled {
 			// Cancelled by user (esc) — silently ignore
+			return m, nil
+		}
+		if isDemoOllamaError(msg.err) {
+			m.toast = "AI review is disabled in public demo mode"
+			(&m).queueAlert(alertHint, demoOllamaMessage())
 			return m, nil
 		}
 		m.err = msg.err

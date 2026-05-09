@@ -78,18 +78,6 @@ func (m model) View() string {
 		return m.renderHelp()
 	}
 
-	// Terminal too small warning
-	if m.width < minTerminalWidth || m.height < minTerminalHeight {
-		return lipgloss.NewStyle().
-			Foreground(colorWarn).
-			Bold(true).
-			Padding(1).
-			Render(fmt.Sprintf(
-				"terminal too small: %dx%d\nminimum: %dx%d\n\nplease resize or zoom out",
-				m.width, m.height, minTerminalWidth, minTerminalHeight,
-			))
-	}
-
 	header := m.renderHeader()
 	content := m.renderContent()
 	status := m.renderStatus()
