@@ -1100,7 +1100,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	if key == "?" {
+	if key == "?" && (!m.typingConsumesQuestionMark() || m.showHelp) {
 		m.showHelp = !m.showHelp
 		if m.showHelp {
 			m.syncHelpViewport()
@@ -1155,6 +1155,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) typingConsumesQuestionMark() bool {
+	return m.answerTA.Focused() || m.learnTA.Focused() || m.pickSearch.Focused()
 }
 
 // --- Dashboard ---

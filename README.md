@@ -1,6 +1,8 @@
 # unrot
 
-Terminal study app for reviewing your own knowledge files with Ollama-generated questions. `unrot` mixes confidence tracking, guided review, chat-assisted learning, and coding challenges into one workflow.
+Terminal study app for reviewing your own knowledge files with Ollama-generated questions. `unrot` mixes confidence tracking, guided review, chat-assisted learning, and coding challenges without forcing your notes into a separate platform.
+
+![unrot hero screenshot](assets/screenshots/hero.png)
 
 ## Install
 
