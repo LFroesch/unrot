@@ -113,7 +113,7 @@ func (m model) renderHeader() string {
 	title := headerTitleStyle.Render("unrot")
 
 	var parts []string
-	parts = append(parts, title)
+	parts = append(parts, title, headerDimStyle.Render(version))
 
 	// Level badge
 	if m.state != nil {
