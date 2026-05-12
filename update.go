@@ -127,14 +127,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ollamaHealthMsg:
+		m.ollamaHost = msg.host
 		if msg.err == nil {
+			m.ollamaOK = true
 			return m, nil
 		}
-		if isDemoMode() {
-			(&m).queueAlert(alertHint, demoOllamaMessage())
-			return m, nil
-		}
-		(&m).queueAlert(alertHint, fmt.Sprintf("Ollama not running at %s", msg.host))
+		m.ollamaOK = false
+		(&m).blockOllamaAction()
 		return m, nil
 
 	case questionMsg:
@@ -1506,6 +1505,10 @@ func (m model) handleLesson(msg tea.KeyMsg) (model, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "enter", " ":
+		if !m.ollamaOK {
+			(&m).blockOllamaAction()
+			return m, nil
+		}
 		diff := ollama.DifficultyFromConfidence(m.currentConfidence())
 		m.quizStep = stepLoading
 		openQuestionLog(&m)
@@ -1697,6 +1700,10 @@ func (m model) handleQuestion(msg tea.KeyMsg) (model, tea.Cmd) {
 
 	// Regenerate question
 	if key == "ctrl+r" {
+		if !m.ollamaOK {
+			(&m).blockOllamaAction()
+			return m, nil
+		}
 		diff := ollama.DifficultyFromConfidence(m.currentConfidence())
 		m.quizStep = stepLoading
 		m.hints = nil
@@ -1954,6 +1961,10 @@ func (m model) handleResult(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, hintCmd(m.ollamaCtx, m.ollama, m.currentQ.Text, m.currentQ.Answer, m.hints)
 		}
 		// Re-quiz: generate a new question on the same topic
+		if !m.ollamaOK {
+			(&m).blockOllamaAction()
+			return m, nil
+		}
 		diff := ollama.DifficultyFromConfidence(m.currentConfidence())
 		m.quizStep = stepLoading
 		m.hints = nil

@@ -22,3 +22,22 @@ func TestQuestionMarkTypesIntoLearnTextarea(t *testing.T) {
 		t.Fatalf("learn textarea value = %q, want ?", got.learnTA.Value())
 	}
 }
+
+func TestLessonEnterDoesNotStartLoadingWhenOllamaUnavailable(t *testing.T) {
+	t.Setenv("DEMO_ENV", "1")
+
+	m := initialModel("", "", 5, 0)
+	m.phase = phaseQuiz
+	m.quizStep = stepLesson
+	m.ollamaOK = false
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(model)
+
+	if got.quizStep != stepLesson {
+		t.Fatalf("quiz step = %v, want lesson", got.quizStep)
+	}
+	if got.toast == "" {
+		t.Fatal("expected explanatory toast when ollama is unavailable")
+	}
+}

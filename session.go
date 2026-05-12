@@ -197,6 +197,10 @@ func (m *model) nextQuestion() tea.Cmd {
 	}
 
 	if m.pickMode {
+		if !m.ollamaOK {
+			m.blockOllamaAction()
+			return nil
+		}
 		m.clearAuditState()
 		diff := ollama.DifficultyFromConfidence(m.state.GetConfidence(m.currentFile))
 		m.quizStep = stepLoading
@@ -210,6 +214,10 @@ func (m *model) nextQuestion() tea.Cmd {
 		return m.startFile(m.reviewFiles[m.fileIdx])
 	}
 	if len(m.retryQueue) > 0 {
+		if !m.ollamaOK {
+			m.blockOllamaAction()
+			return nil
+		}
 		m.retryPhase = true
 		file := m.retryQueue[0]
 		m.retryQueue = m.retryQueue[1:]

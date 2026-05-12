@@ -188,6 +188,8 @@ type model struct {
 	// Config
 	brainPath    string
 	ollama       *ollama.Client
+	ollamaOK     bool
+	ollamaHost   string
 	state        *state.State
 	cliDomain    string // CLI arg: only quiz this domain (immutable)
 	domainFilter string // active domain filter (set by tab cycling or CLI)
@@ -534,7 +536,28 @@ func (m *model) rebuildOllamaClient() {
 		savedModel = m.state.Model
 	}
 	m.ollama = ollama.New(savedModel)
+	m.ollamaHost = m.ollama.Host()
 	applyCallLogger(m)
+}
+
+func (m *model) ollamaUnavailableMessage() string {
+	if isDemoMode() {
+		return demoOllamaMessage()
+	}
+	host := m.ollamaHost
+	if host == "" && m.ollama != nil {
+		host = m.ollama.Host()
+	}
+	if host == "" {
+		return "Ollama is not available."
+	}
+	return fmt.Sprintf("Ollama not running at %s", host)
+}
+
+func (m *model) blockOllamaAction() {
+	msg := m.ollamaUnavailableMessage()
+	m.toast = msg
+	m.queueAlert(alertHint, msg)
 }
 
 // newOllamaCtx cancels any in-flight ollama request and creates a fresh context for the next one.
