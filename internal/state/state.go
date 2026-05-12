@@ -2,10 +2,13 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -197,6 +200,52 @@ type RecentQuestion struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+type challengeDiffJSON int
+
+func (d *challengeDiffJSON) UnmarshalJSON(data []byte) error {
+	var num int
+	if err := json.Unmarshal(data, &num); err == nil {
+		*d = challengeDiffJSON(clampChallengeDiff(num))
+		return nil
+	}
+
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return fmt.Errorf("decode challenge_diff: %w", err)
+	}
+
+	text = strings.TrimSpace(strings.ToLower(text))
+	if text == "" {
+		*d = 0
+		return nil
+	}
+	if n, err := strconv.Atoi(text); err == nil {
+		*d = challengeDiffJSON(clampChallengeDiff(n))
+		return nil
+	}
+
+	switch text {
+	case "adaptive", "auto", "default":
+		*d = 0
+	case "basic", "easy", "beginner":
+		*d = 1
+	case "intermediate", "medium":
+		*d = 2
+	case "advanced", "hard":
+		*d = 3
+	default:
+		return fmt.Errorf("decode challenge_diff: unsupported value %q", text)
+	}
+	return nil
+}
+
+func clampChallengeDiff(v int) int {
+	if v < 0 || v > 3 {
+		return 0
+	}
+	return v
+}
+
 // stateJSON is the on-disk format.
 type stateJSON struct {
 	Files           map[string]*FileState `json:"files"`
@@ -208,7 +257,7 @@ type stateJSON struct {
 	Achievements    []string              `json:"achievements,omitempty"`
 	Favorites       []string              `json:"favorites,omitempty"`
 	MaxQuestions    int                   `json:"max_questions,omitempty"`
-	ChallengeDiff   int                   `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
+	ChallengeDiff   challengeDiffJSON     `json:"challenge_diff,omitempty"` // 0=adaptive, 1=basic, 2=intermediate, 3=advanced
 	BrainPath       string                `json:"brain_path,omitempty"`
 	Model           string                `json:"model,omitempty"`
 	ActiveQTypes    []string              `json:"active_question_types,omitempty"`
@@ -295,7 +344,7 @@ func Load() (*State, error) {
 		s.Favorites[f] = true
 	}
 	s.MaxQuestions = v2.MaxQuestions
-	s.ChallengeDiff = v2.ChallengeDiff
+	s.ChallengeDiff = int(v2.ChallengeDiff)
 	s.BrainPath = v2.BrainPath
 	s.Model = v2.Model
 	if len(v2.ActiveQTypes) > 0 {
@@ -358,7 +407,7 @@ func (s *State) Save() error {
 		Achievements:    s.Achievements,
 		Favorites:       favs,
 		MaxQuestions:    s.MaxQuestions,
-		ChallengeDiff:   s.ChallengeDiff,
+		ChallengeDiff:   challengeDiffJSON(s.ChallengeDiff),
 		BrainPath:       s.BrainPath,
 		Model:           s.Model,
 		ActiveQTypes:    s.ActiveQTypes,
