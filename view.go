@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LFroesch/tui-suite/suitechrome"
+	"github.com/LFroesch/unrot/suitechrome"
 	"github.com/LFroesch/unrot/internal/knowledge"
 	"github.com/LFroesch/unrot/internal/ollama"
 	"github.com/LFroesch/unrot/internal/state"
