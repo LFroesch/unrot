@@ -4,9 +4,11 @@ Terminal study app for reviewing your own knowledge files with Ollama-generated 
 
 ![unrot hero screenshot](assets/screenshots/hero.png)
 
+**Live demo:** [froesch.dev](https://froesch.dev)
+
 ## Install
 
-Supported platforms: Linux and macOS. On Windows, use WSL.
+Supported platforms: Linux, macOS, and Windows.
 
 `unrot` depends on a running [Ollama](https://ollama.com) daemon. The default model is `qwen2.5:7b`.
 
@@ -20,6 +22,16 @@ Other options:
 ```bash
 go install github.com/LFroesch/unrot@latest
 make install
+```
+
+Windows:
+
+```powershell
+./install.ps1
+```
+
+```bat
+install.cmd
 ```
 
 Run:

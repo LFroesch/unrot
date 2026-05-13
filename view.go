@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LFroesch/tui-suite/suitechrome"
 	"github.com/LFroesch/unrot/internal/knowledge"
 	"github.com/LFroesch/unrot/internal/ollama"
 	"github.com/LFroesch/unrot/internal/state"
@@ -110,10 +111,8 @@ func (m model) View() string {
 }
 
 func (m model) renderHeader() string {
-	title := headerTitleStyle.Render("unrot")
-
 	var parts []string
-	parts = append(parts, title, headerDimStyle.Render(version))
+	parts = append(parts, suitechrome.RenderTitle("unrot", version))
 
 	// Level badge
 	if m.state != nil {
@@ -138,7 +137,7 @@ func (m model) renderHeader() string {
 		}
 		// Combo streak
 		if m.comboCount >= 2 {
-			parts = append(parts, lipgloss.NewStyle().Foreground(colorWarn).Background(lipgloss.Color("235")).Bold(true).Inline(true).Render(fmt.Sprintf("🎯 ×%d", m.comboCount)))
+			parts = append(parts, lipgloss.NewStyle().Foreground(colorWarn).Bold(true).Inline(true).Render(fmt.Sprintf("🎯 ×%d", m.comboCount)))
 		}
 	}
 
@@ -244,15 +243,14 @@ func (m model) renderHeader() string {
 	rightSep := headerDimStyle.Render(" · ")
 	right := strings.Join(rightParts, rightSep)
 
-	bar := alignBar(left, right, m.width-2)
-	return headerBarStyle.Width(m.width).Render(bar)
+	bar := alignBar(left, right, m.width)
+	return bar
 }
 
 // headerTabBar returns the tab bar for the current phase (rendered in header area).
 func (m model) headerTabBar() string {
-	bg := lipgloss.Color("235")
-	active := lipgloss.NewStyle().Foreground(colorAccent).Background(bg).Bold(true).Inline(true)
-	inactive := lipgloss.NewStyle().Foreground(colorDim).Background(bg).Inline(true)
+	active := lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Inline(true)
+	inactive := lipgloss.NewStyle().Foreground(colorDim).Inline(true)
 
 	if m.phase == phaseQuiz && m.quizStep == stepQuestion {
 		tabs := []struct {
@@ -271,7 +269,7 @@ func (m model) headerTabBar() string {
 				parts = append(parts, inactive.Render(" "+t.label+" "))
 			}
 		}
-		sep := lipgloss.NewStyle().Background(bg).Inline(true).Render(" ")
+		sep := " "
 		return " " + strings.Join(parts, sep)
 	}
 
@@ -292,7 +290,7 @@ func (m model) headerTabBar() string {
 				parts = append(parts, inactive.Render(" "+t.label+" "))
 			}
 		}
-		sep := lipgloss.NewStyle().Background(bg).Inline(true).Render(" ")
+		sep := " "
 		return " " + strings.Join(parts, sep)
 	}
 
@@ -300,14 +298,13 @@ func (m model) headerTabBar() string {
 }
 
 func (m model) headerDiffStyle(d ollama.Difficulty) string {
-	bg := lipgloss.Color("235")
 	switch d {
 	case ollama.DiffAdvanced:
-		return lipgloss.NewStyle().Foreground(colorError).Background(bg).Bold(true).Inline(true).Render("hard")
+		return lipgloss.NewStyle().Foreground(colorError).Bold(true).Inline(true).Render("hard")
 	case ollama.DiffIntermediate:
-		return lipgloss.NewStyle().Foreground(colorPrimary).Background(bg).Inline(true).Render("med")
+		return lipgloss.NewStyle().Foreground(colorPrimary).Inline(true).Render("med")
 	default:
-		return lipgloss.NewStyle().Foreground(colorPrimary).Background(bg).Inline(true).Render("easy")
+		return lipgloss.NewStyle().Foreground(colorPrimary).Inline(true).Render("easy")
 	}
 }
 
@@ -2221,7 +2218,7 @@ func (m model) renderStatus() string {
 		}
 	}
 
-	return statusBarStyle.Width(m.width).Render(strings.Join(parts, ""))
+	return strings.Join(parts, "")
 }
 
 func (m model) quizStatusKeys() []struct{ key, action string } {
@@ -2426,5 +2423,5 @@ func (m model) renderHelpStatus() string {
 	if hint := scrollHint(m.helpViewport); hint != "" {
 		parts = append(parts, statusBulletStyle.Render(" · "), statusBulletStyle.Render(hint))
 	}
-	return statusBarStyle.Width(m.width).Render(strings.Join(parts, ""))
+	return strings.Join(parts, "")
 }

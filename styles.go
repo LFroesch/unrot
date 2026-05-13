@@ -93,29 +93,24 @@ var (
 
 	// Full-width header bar
 	headerBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("235")).
 			Padding(0, 1)
 
 	// Full-width status bar
 	statusBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("235")).
 			Padding(0, 1)
 
 	// Inline styles for status bar text (need matching background)
 	statusKeyStyle = lipgloss.NewStyle().
 			Foreground(colorAccent).
-			Background(lipgloss.Color("235")).
 			Bold(true).
 			Inline(true)
 
 	statusActionStyle = lipgloss.NewStyle().
 				Foreground(colorText).
-				Background(lipgloss.Color("235")).
 				Inline(true)
 
 	statusBulletStyle = lipgloss.NewStyle().
 				Foreground(colorDim).
-				Background(lipgloss.Color("235")).
 				Inline(true)
 
 	// Header inline styles
