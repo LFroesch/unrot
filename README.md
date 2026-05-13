@@ -8,20 +8,15 @@ Terminal study app for reviewing your own knowledge files with Ollama-generated 
 
 ## Install
 
-Supported platforms: Linux, macOS, and Windows.
+Supported platforms: Linux and macOS.
+
+Windows release binaries and installer entrypoints are shipped, but native Windows support is unverified.
 
 `unrot` depends on a running [Ollama](https://ollama.com) daemon. The default model is `qwen2.5:7b`.
 
 ```bash
 ollama pull qwen2.5:7b
 curl -fsSL https://raw.githubusercontent.com/LFroesch/unrot/main/install.sh | bash
-```
-
-Other options:
-
-```bash
-go install github.com/LFroesch/unrot@latest
-make install
 ```
 
 Windows:
@@ -32,6 +27,13 @@ Windows:
 
 ```bat
 install.cmd
+```
+
+Other options:
+
+```bash
+go install github.com/LFroesch/unrot@latest
+make install
 ```
 
 Run:
