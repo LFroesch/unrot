@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 type AppMeta struct {
@@ -32,9 +33,9 @@ var (
 			Foreground(lipgloss.Color("245"))
 
 	activeTabStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("230")).
-				Underline(true)
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Underline(true)
 
 	inactiveTabStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("245"))
@@ -120,16 +121,57 @@ func RenderActions(actions []Action) string {
 }
 
 func JoinHeader(width int, left, right string) string {
-	if strings.TrimSpace(right) == "" {
-		return left
+	if width <= 0 {
+		return ""
 	}
-	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 2 {
-		return left
+	if strings.TrimSpace(right) == "" {
+		return fitText(left, width)
+	}
+
+	right = truncateANSI(right, width)
+	rightWidth := lipgloss.Width(right)
+	if rightWidth >= width {
+		return fitText(right, width)
+	}
+
+	leftWidth := lipgloss.Width(left)
+	availableLeft := width - rightWidth - 1
+	if availableLeft < 1 {
+		return fitText(right, width)
+	}
+	if leftWidth > availableLeft {
+		left = truncateANSI(left, availableLeft)
+		leftWidth = lipgloss.Width(left)
+	}
+
+	gap := width - leftWidth - rightWidth
+	if gap < 1 {
+		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
 
 func JoinLine(width int, left, right string) string {
 	return JoinHeader(width, left, right)
+}
+
+func truncateANSI(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	return xansi.Truncate(s, width, "…")
+}
+
+func fitText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	s = truncateANSI(s, width)
+	if w := lipgloss.Width(s); w < width {
+		s += strings.Repeat(" ", width-w)
+	}
+	return s
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/LFroesch/unrot/suitechrome"
 	"github.com/charmbracelet/bubbles/viewport"
 	xansi "github.com/charmbracelet/x/ansi"
 
@@ -96,34 +97,7 @@ func fitText(s string, width int) string {
 
 // alignBar composes left/right header content into a fixed-width line.
 func alignBar(left, right string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	if right == "" {
-		return fitText(left, width)
-	}
-
-	right = truncateANSI(right, width)
-	rightWidth := lipgloss.Width(right)
-	if rightWidth >= width {
-		return fitText(right, width)
-	}
-
-	leftWidth := lipgloss.Width(left)
-	availableLeft := width - rightWidth - 1
-	if availableLeft < 1 {
-		return fitText(right, width)
-	}
-	if leftWidth > availableLeft {
-		left = truncateANSI(left, availableLeft)
-		leftWidth = lipgloss.Width(left)
-	}
-
-	gap := width - leftWidth - rightWidth
-	if gap < 1 {
-		gap = 1
-	}
-	return left + strings.Repeat(" ", gap) + right
+	return suitechrome.JoinHeader(width, left, right)
 }
 
 // scrollHint returns a compact dim scroll indicator for the header bar.

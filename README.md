@@ -6,20 +6,32 @@ Terminal study app for reviewing your own knowledge files with Ollama-generated 
 
 **Live demo:** [froesch.dev](https://froesch.dev)
 
+## Release Status
+
+Developed for WSL2/Linux first. Cross-platform testing and bug fixing for macOS and native Windows are still in progress.
+
+Linux, WSL2, and macOS are the primary targets today. Windows binaries and installer entrypoints are available, but native Windows should still be treated as experimental.
+
 ## Install
 
-Supported platforms: Linux and macOS.
-
-Windows release binaries and installer entrypoints are shipped, but native Windows support is unverified.
-
 `unrot` depends on a running [Ollama](https://ollama.com) daemon. The default model is `qwen2.5:7b`.
+
+Quick install:
 
 ```bash
 ollama pull qwen2.5:7b
 curl -fsSL https://raw.githubusercontent.com/LFroesch/unrot/main/install.sh | bash
 ```
 
-Windows:
+Experimental native Windows install:
+
+```powershell
+irm https://raw.githubusercontent.com/LFroesch/unrot/main/install.ps1 | iex
+```
+
+Direct installers: [`install.sh`](https://raw.githubusercontent.com/LFroesch/unrot/main/install.sh), [`install.ps1`](https://raw.githubusercontent.com/LFroesch/unrot/main/install.ps1)
+
+If you cloned the repo already:
 
 ```powershell
 ./install.ps1
